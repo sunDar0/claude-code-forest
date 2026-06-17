@@ -1,0 +1,49 @@
+{
+  "name": "claude-code-forest",
+  "version": "1.0.0",
+  "description": "Claude Code 일간 LLM 사용량을 절차적 도트 그래픽 숲으로 보여주는 로컬 폴링 대시보드",
+  "type": "module",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "app": "open -na 'Google Chrome' --args --app=http://localhost:5178 --window-size=1400,900",
+    "usage:once": "node server/aggregate.js --once",
+    "forest:once": "node server/store.js --forest",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.claudeforest.app",
+    "productName": "Claude Code Forest",
+    "files": [
+      "main.js",
+      "preload.js",
+      "server/**/*",
+      "public/**/*",
+      "mock/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "hardenedRuntime": false
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    }
+  },
+  "devDependencies": {
+    "electron": "^42.4.0",
+    "electron-builder": "^26.15.3"
+  }
+}

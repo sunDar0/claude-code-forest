@@ -1,0 +1,6 @@
+_workspace
+data/
+mock/
+node_modules/
+dist/
+.env

@@ -1,0 +1,1100 @@
+<!doctype html>
+<html lang="ko">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Claude Code Forest</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #0b1622;
+      overflow: hidden;
+      font-family: "Courier New", monospace;
+    }
+
+    /* 캔버스(숲). 픽셀 도트가 흐려지지 않게 nearest. UI 는 DOM 오버레이(§12).
+         §63 16:9 레터박스(contain): 숲 장면은 항상 16:9 고정. left/top/width/height 는 JS
+         (renderer._layoutCanvas)가 매 _recompute·resize 마다 갱신한다 — 가로 중앙, 세로 하단 고정.
+         남는 영역은 body 배경(#0b1622, 검정)이 레터박스로 보인다. */
+    #forest {
+      display: block;
+      position: absolute;
+      left: 0;
+      top: 0;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background: #0b1622;
+    }
+
+    /* ---- DOM UI 오버레이: 화면 고정(줌/팬 무관) ---- */
+    #ui {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      /* 캔버스 드래그 통과(패널 위만 막음) */
+      z-index: 10;
+    }
+
+    .panel {
+      position: absolute;
+      background: rgba(40, 28, 18, 0.82);
+      border-top: 2px solid rgba(90, 64, 40, 0.95);
+      border-bottom: 2px solid rgba(90, 64, 40, 0.95);
+      color: #e8dcc8;
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.2;
+      white-space: nowrap;
+      border-radius: 2px;
+    }
+
+    .metric {
+      display: inline-block;
+      vertical-align: top;
+    }
+
+    .metric .label {
+      color: #e8dcc8;
+      font-size: 11px;
+    }
+
+    .metric .sub {
+      color: #9a8c78;
+      font-size: 10px;
+    }
+
+    .metric .val {
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    /* 우상단(§16-1): 5h/7d + 이번달 활성수 + 월 누적 5메트릭. 세로 컴팩트. */
+    /* §16-1 #3: 우상단 패널 키워 가독성↑(하단과 비슷하게). */
+    #hud-tr {
+      top: 44px;
+      /* 위 독립 #autoplant-toggle(top 8·높이 ~30, bottom 38) 와 안 겹치게 아래로 */
+      right: 8px;
+      min-width: 180px;
+      text-align: right;
+      padding: 10px 13px;
+      padding-bottom: 30px;
+      /* §20-7: 좌하단 토글 버튼 공간 확보 */
+      font-size: 13px;
+    }
+
+    #hud-tr .util {
+      margin-bottom: 6px;
+      padding-right: 36px;
+      /* §60-1·§61 우상단 톱니(절대, 28px) 와 안 겹치게 */
+    }
+
+    /* 자동 심기 토글: #ui(z-10 stacking context) 밖 body 직속 → z-index 47(차단 오버레이 45 위).
+         심는 중에도 이 토글만 클릭 가능(다른 입력은 오버레이가 차단). 우상단 최상단, #hud-tr(top 36) 위. */
+    #autoplant-toggle {
+      position: fixed;
+      top: 8px;
+      right: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+      padding: 4px 9px;
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+      color: #cfe8bf;
+      background: rgba(40, 28, 18, 0.82);
+      border: 1px solid rgba(90, 64, 40, 0.95);
+      border-radius: 3px;
+      pointer-events: auto;
+      cursor: pointer;
+      z-index: 47;
+      /* 차단 오버레이(45)·인디케이터(46) 위 — 심는 중 끄기 가능 */
+    }
+
+    #autoplant-toggle input {
+      width: 14px;
+      height: 14px;
+      cursor: pointer;
+    }
+
+    /* HUD 접힌 상태에서도 토글은 보이게(독립 fixed 라 자동으로 유지). */
+    #hud-tr .util span {
+      margin-left: 12px;
+    }
+
+    #hud-tr .server-port {
+      font-size: 11px;
+      color: #9a8c78;
+      margin-bottom: 5px;
+      padding-right: 36px;
+      /* 우상단 톱니(절대, 28px)에 포트 숫자가 가리지 않게 */
+    }
+
+    #hud-tr .server-port span {
+      color: #bfe88f;
+      font-weight: bold;
+    }
+
+    #hud-tr .month-count {
+      font-size: 13px;
+      color: #d8c8a8;
+      margin-bottom: 5px;
+    }
+
+    #hud-tr .month-count span {
+      color: #bfe88f;
+      font-weight: bold;
+      font-size: 15px;
+    }
+
+    #hud-tr .month-label {
+      font-size: 11px;
+      color: #9a8c78;
+      border-top: 1px solid rgba(90, 64, 40, 0.6);
+      padding-top: 4px;
+      margin-bottom: 3px;
+    }
+
+    #hud-tr .metric {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      width: 100%;
+      margin-bottom: 1px;
+    }
+
+    #hud-tr .metric .label {
+      font-size: 12px;
+    }
+
+    #hud-tr .metric .val {
+      font-size: 14px;
+    }
+
+    /* 하단 스트립(§16-1·§61): 상단 바(업로드 묶음) + 5메트릭 행. §61 정렬 보정. */
+    #hud-bottom {
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      text-align: center;
+    }
+
+    /* §61 메트릭 행 래퍼: 5개 가로 가운데 정렬(기존 모양 유지). */
+    #hud-bottom-metrics {
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+    }
+
+    #hud-bottom .metric {
+      width: 110px;
+      margin: 0 4px;
+    }
+
+    /* §57·§61 업로드 상태+버튼 묶음: 하단 패널 **상단 전용 바**(우측 정렬 + 하단 구분선).
+         메트릭 행과 시각적으로 분리해 겹침 0(§61 정렬 보정 — 이전 절대배치가 메트릭 위 올라타던 문제).
+         pointer-events 켜서 즉시 전송 버튼 클릭 받음(#ui 는 none). */
+    #upload-row {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      font-size: 11px;
+      color: #b8a98a;
+      line-height: 1.4;
+      padding-bottom: 6px;
+      margin-bottom: 6px;
+      border-bottom: 1px solid rgba(90, 64, 40, 0.6);
+    }
+
+    #upload-row .up-icon {
+      color: #8fb8e0;
+    }
+
+    #upload-row .up-when {
+      color: #d8c8a8;
+    }
+
+    #upload-row.up-off {
+      color: #7a6f5c;
+    }
+
+    #upload-row.up-err .up-when {
+      color: #e89a9a;
+    }
+
+    #upload-now {
+      pointer-events: auto;
+      font-family: inherit;
+      font-size: 11px;
+      line-height: 1.2;
+      padding: 2px 9px;
+      border-radius: 10px;
+      border: 1px solid rgba(120, 160, 200, 0.7);
+      background: rgba(36, 50, 66, 0.85);
+      color: #cfe2f5;
+      cursor: pointer;
+    }
+
+    #upload-now:hover:not(:disabled) {
+      background: rgba(48, 66, 86, 0.95);
+    }
+
+    #upload-now:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+
+    /* §60-1 업로드 설정 모달 열기 톱니: 우상단 HUD 패널(#hud-tr) 우상단 모서리 안쪽(절대).
+         항상 활성(설정은 enabled 무관). pointer-events 켜서 클릭 받음(#ui 는 none). */
+    /* §61 톱니 크기 ↑(클릭 쉽게). 우상단 위치 유지. */
+    #upload-cfg {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      pointer-events: auto;
+      font-family: inherit;
+      font-size: 17px;
+      line-height: 1;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: 6px;
+      border: 1px solid rgba(120, 120, 130, 0.5);
+      background: rgba(40, 40, 46, 0.7);
+      color: #c8c8cf;
+      cursor: pointer;
+      z-index: 31;
+    }
+
+    #upload-cfg:hover {
+      background: rgba(58, 58, 66, 0.92);
+      color: #eee;
+    }
+
+    /* HUD 접힌 상태(§20-7)에서도 톱니는 접기 토글 옆에 보이게(설정은 항상 접근 가능). */
+    #ui.hud-collapsed #upload-cfg {
+      position: static;
+      display: inline-block;
+      margin-left: 4px;
+    }
+
+    /* §20-7 HUD 접기 토글 버튼: #hud-tr 패널의 좌하단 모서리 안쪽.
+         pointer-events 켜서 클릭 받음(#ui 는 none). 크기는 패널 폰트(13px)에 맞춤. */
+    #hud-toggle {
+      position: absolute;
+      left: 8px;
+      bottom: 6px;
+      padding: 1px 7px;
+      background: rgba(60, 44, 28, 0.6);
+      border: 1px solid rgba(90, 64, 40, 0.95);
+      color: #e8dcc8;
+      font-size: 11px;
+      line-height: 1.4;
+      border-radius: 3px;
+      cursor: pointer;
+      pointer-events: auto;
+      z-index: 30;
+    }
+
+    #hud-toggle:hover {
+      background: rgba(80, 60, 38, 0.9);
+    }
+
+    /* 접힌 상태: 우상단 패널은 골격만 남기고(작게 축소) 내용 wrapper 만 숨김.
+         토글 버튼은 남아 펼치기 역할. 하단 스트립은 전체 숨김. */
+    #ui.hud-collapsed #hud-tr {
+      min-width: 0;
+      padding: 0;
+    }
+
+    #ui.hud-collapsed #hud-tr-body {
+      display: none;
+    }
+
+    #ui.hud-collapsed #hud-toggle {
+      position: static;
+      display: block;
+    }
+
+    #ui.hud-collapsed #hud-bottom {
+      display: none;
+    }
+
+    /* 색상 위계(§16-1 갱신): 같은 색을 명도로 구분.
+         하단(오늘)=옅게(cl-*, 밝게/연하게), 우상단(월 누적)=짙게(cd-*, 어둡게/진하게). */
+    .cl-input {
+      color: #a6d8ff;
+    }
+
+    .cd-input {
+      color: #2f86d6;
+    }
+
+    .cl-output {
+      color: #aeeaa0;
+    }
+
+    .cd-output {
+      color: #3da53f;
+    }
+
+    .cl-cwrite {
+      color: #e3c89a;
+    }
+
+    .cd-cwrite {
+      color: #a07a3c;
+    }
+
+    .cl-cread {
+      color: #ffeaa0;
+    }
+
+    .cd-cread {
+      color: #d6a800;
+    }
+
+    .cl-req {
+      color: #f3c5e3;
+    }
+
+    .cd-req {
+      color: #c2629e;
+    }
+
+    /* 5h/7d·라벨은 기존 톤 유지 */
+    .c-5h {
+      color: #b8c8a0;
+      font-size: 11px;
+    }
+
+    .c-7d {
+      color: #c8b890;
+      font-size: 11px;
+    }
+
+    /* 경험치 바(§13-5): 어두운 트랙 + 초록 채움 + 퍼센트 텍스트 */
+    .xpbar {
+      position: relative;
+      height: 12px;
+      background: rgba(20, 14, 8, 0.9);
+      border: 1px solid rgba(90, 70, 45, 0.9);
+      border-radius: 2px;
+      margin: 3px 0 5px;
+      overflow: hidden;
+    }
+
+    .xpfill {
+      height: 100%;
+      background: linear-gradient(#6fd66f, #3f9a3f);
+      transition: width 0.3s ease;
+    }
+
+    .xptext {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      text-align: center;
+      font-size: 9px;
+      line-height: 12px;
+      color: #fff;
+      text-shadow: 0 0 2px #000, 0 0 2px #000;
+    }
+
+    .xplabel {
+      color: #b9a98e;
+      font-size: 10px;
+      margin-top: 2px;
+    }
+
+    .dsep {
+      height: 1px;
+      background: rgba(120, 90, 55, 0.5);
+      margin: 6px 0;
+    }
+
+    /* 호버 툴팁(커서 따라감) */
+    #tooltip {
+      position: fixed;
+      background: rgba(28, 20, 12, 0.94);
+      border: 1px solid rgba(120, 90, 55, 0.95);
+      color: #dfe8d0;
+      padding: 5px 7px;
+      font-size: 11px;
+      line-height: 1.35;
+      white-space: nowrap;
+      border-radius: 2px;
+      display: none;
+      z-index: 20;
+    }
+
+    #tooltip .title {
+      color: #ffe6a8;
+      font-weight: bold;
+      margin-bottom: 2px;
+    }
+
+    /* 클릭 상세 패널(중앙 상단). §56: 데스크탑 기준 크게(읽기 편하게). */
+    #detail {
+      position: fixed;
+      top: 56px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(24, 16, 10, 0.96);
+      border: 2px solid rgba(150, 110, 65, 1);
+      color: #f0ead8;
+      padding: 16px 22px;
+      font-size: 14px;
+      line-height: 1.4;
+      border-radius: 5px;
+      display: none;
+      pointer-events: auto;
+      /* 패널 위 클릭은 닫힘 트리거 안 함 */
+      min-width: 320px;
+      max-width: 440px;
+      max-height: 82vh;
+      overflow-y: auto;
+      box-shadow: 0 6px 26px rgba(0, 0, 0, 0.55);
+      z-index: 20;
+    }
+
+    /* 선택 칸 확대 프리뷰(모달 상단) */
+    #detail .detail-preview {
+      display: flex;
+      justify-content: center;
+      margin: 0 0 10px;
+    }
+    #detail .detail-preview img {
+      width: 128px;
+      height: 128px;
+      image-rendering: pixelated;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, .15);
+    }
+
+    #detail .title {
+      color: #ffe6a8;
+      font-weight: bold;
+      font-size: 17px;
+      margin-bottom: 4px;
+    }
+
+    /* §56 부제(수종·요일) */
+    #detail .subtitle {
+      color: #c8b58e;
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+
+    #detail .drow {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 2px 0;
+    }
+
+    #detail .drow .k {
+      color: #b9a98e;
+    }
+
+    #detail .drow .v {
+      font-weight: bold;
+    }
+
+    /* §56 섹션 제목(메트릭 그룹 헤더) */
+    #detail .section {
+      color: #d8b87a;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin: 10px 0 3px;
+    }
+
+    /* §56 메트릭 raw 값 옆 비중(정규화) 회색 보조 */
+    #detail .drow .nrm {
+      color: #8a7c66;
+      font-size: 11px;
+      margin-left: 8px;
+    }
+
+    /* §62 선형 비중 안내 한 줄(옅은 색·작은 글씨). */
+    #detail .pct-note {
+      color: #8a7c66;
+      font-size: 10px;
+      line-height: 1.35;
+      margin-top: 5px;
+      font-style: italic;
+    }
+
+    #detail .hint {
+      color: #8a7c66;
+      font-size: 11px;
+      margin-top: 10px;
+    }
+
+    /* 상태 표식 */
+    #offline {
+      position: fixed;
+      left: 8px;
+      bottom: 48px;
+      background: rgba(120, 20, 20, 0.85);
+      color: #ffb0b0;
+      padding: 3px 8px;
+      font-size: 11px;
+      border-radius: 2px;
+      display: none;
+      z-index: 15;
+    }
+
+    #empty-note {
+      position: fixed;
+      left: 12px;
+      top: 12px;
+      color: #cfd8dc;
+      font-size: 13px;
+      display: none;
+      z-index: 15;
+    }
+
+    /* 심는 중 입력 차단 오버레이(자동 점진 연출·수동 activate 왕복 동안).
+         전체를 덮어 줌/팬/클릭을 흡수(pointer-events). 위에 인디케이터 배지. */
+    #planting-overlay {
+      position: fixed;
+      inset: 0;
+      background: transparent;
+      display: none;
+      /* JS 가 block 으로 표시 */
+      z-index: 45;
+      /* 모달(40~42)보다 위: 연출 중엔 모든 입력 차단 */
+      pointer-events: auto;
+      cursor: progress;
+    }
+
+    /* 심는 중 인디케이터 배지(화면 상단 중앙·잘 보이게). 끄기 버튼 포함. */
+    #planting-indicator {
+      position: fixed;
+      left: 50%;
+      top: 72px;
+      transform: translateX(-50%);
+      display: none;
+      /* JS 가 flex 로 표시 */
+      align-items: center;
+      gap: 10px;
+      background: rgba(30, 50, 25, 0.94);
+      border: 1px solid rgba(120, 200, 110, 0.85);
+      color: #d8f5cf;
+      padding: 7px 10px 7px 16px;
+      font-size: 13px;
+      border-radius: 14px;
+      z-index: 46;
+      /* 오버레이 위 — 안의 끄기 버튼이 클릭 받음 */
+      pointer-events: none;
+      /* 배지 자체는 통과, 버튼만 auto */
+      box-shadow: 0 3px 14px rgba(0, 0, 0, 0.45);
+    }
+
+    /* 심는 중에도 자동 심기를 끌 수 있는 버튼(오버레이가 다른 입력은 막아도 이건 받음). */
+    #planting-stop {
+      pointer-events: auto;
+      font-family: inherit;
+      font-size: 11px;
+      line-height: 1.2;
+      padding: 3px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(200, 140, 120, 0.7);
+      background: rgba(70, 40, 32, 0.85);
+      color: #f5d8cf;
+      cursor: pointer;
+    }
+
+    #planting-stop:hover {
+      background: rgba(92, 52, 42, 0.95);
+    }
+
+    /* §15-2 활성화 안내(하단 중앙 위) */
+    #plant-prompt {
+      position: fixed;
+      left: 50%;
+      bottom: 56px;
+      transform: translateX(-50%);
+      background: rgba(30, 50, 25, 0.9);
+      border: 1px solid rgba(120, 200, 110, 0.8);
+      color: #d8f5cf;
+      padding: 6px 14px;
+      font-size: 13px;
+      border-radius: 14px;
+      display: none;
+      z-index: 16;
+    }
+
+    /* §15-2 심기 확인 팝업. §56: 버튼·텍스트 크게(읽기 편하게). */
+    #plant-confirm {
+      position: fixed;
+      background: rgba(24, 36, 20, 0.97);
+      border: 2px solid rgba(120, 200, 110, 0.9);
+      color: #e8f5e0;
+      padding: 16px 20px;
+      border-radius: 7px;
+      display: none;
+      min-width: 200px;
+      box-shadow: 0 5px 22px rgba(0, 0, 0, 0.5);
+      z-index: 25;
+      pointer-events: auto;
+    }
+
+    #plant-confirm .cf-title {
+      font-size: 16px;
+      margin-bottom: 14px;
+    }
+
+    #plant-confirm .cf-btns {
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+    }
+
+    #plant-confirm button {
+      font-family: inherit;
+      font-size: 15px;
+      padding: 8px 22px;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+    }
+
+    #plant-confirm .cf-yes {
+      background: #4fa84a;
+      color: #fff;
+    }
+
+    #plant-confirm .cf-no {
+      background: #5a4a3a;
+      color: #e0d6c8;
+    }
+
+    /* §21-1 시작일 모달: 화면 중앙 오버레이(딤 배경 + 카드). 첫 접근 startDate=null 때만. */
+    #start-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 16, 12, 0.72);
+      display: none;
+      /* JS 가 flex 로 표시 */
+      align-items: center;
+      justify-content: center;
+      z-index: 40;
+      pointer-events: auto;
+    }
+
+    #start-modal .card {
+      background: rgba(28, 36, 24, 0.98);
+      border: 2px solid rgba(120, 200, 110, 0.9);
+      border-radius: 6px;
+      padding: 22px 26px;
+      color: #e8f5e0;
+      text-align: center;
+      min-width: 280px;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+    }
+
+    #start-modal .title {
+      font-size: 16px;
+      font-weight: bold;
+      color: #d8f5cf;
+      margin-bottom: 6px;
+    }
+
+    #start-modal .sub {
+      font-size: 12px;
+      color: #9bbd8f;
+      margin-bottom: 14px;
+    }
+
+    #start-modal input[type="date"] {
+      font-family: inherit;
+      font-size: 14px;
+      padding: 7px 10px;
+      border-radius: 4px;
+      border: 1px solid rgba(120, 200, 110, 0.7);
+      background: #14200f;
+      color: #e8f5e0;
+      margin-bottom: 10px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    /* 시작일 모달 자동 심기 토글 줄(HUD 토글과 상태 공유). 카드 톤에 맞춤. */
+    #start-modal .start-autoplant-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      margin-bottom: 12px;
+      font-size: 12px;
+      color: #cfe8bf;
+      cursor: pointer;
+    }
+
+    #start-modal .start-autoplant-row input {
+      width: 15px;
+      height: 15px;
+      cursor: pointer;
+    }
+
+    #start-modal button {
+      font-family: inherit;
+      font-size: 14px;
+      padding: 8px 22px;
+      border-radius: 4px;
+      border: none;
+      background: #4fa84a;
+      color: #fff;
+      cursor: pointer;
+      width: 100%;
+    }
+
+    #start-modal button:hover {
+      background: #5cba56;
+    }
+
+    #start-error {
+      display: none;
+      color: #ffb0b0;
+      font-size: 11px;
+      margin-bottom: 10px;
+    }
+
+    /* §58 업로드 설정 모달: 화면 중앙 딤 + 카드(#start-modal 톤, 폼은 좌측 정렬). */
+    #upload-config-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 14, 18, 0.72);
+      display: none;
+      /* JS 가 flex 로 표시 */
+      align-items: center;
+      justify-content: center;
+      z-index: 42;
+      /* §57 업로드 줄/§56 상세보다 위 */
+      pointer-events: auto;
+    }
+
+    #upload-config-modal .card {
+      background: rgba(26, 30, 36, 0.98);
+      border: 2px solid rgba(120, 160, 200, 0.85);
+      border-radius: 6px;
+      padding: 20px 24px;
+      color: #e6edf5;
+      min-width: 340px;
+      max-width: 420px;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
+    }
+
+    #upload-config-modal .title {
+      font-size: 16px;
+      font-weight: bold;
+      color: #cfe2f5;
+      margin-bottom: 4px;
+    }
+
+    #upload-config-modal .sub {
+      font-size: 11px;
+      color: #8fa3b8;
+      margin-bottom: 14px;
+    }
+
+    #upload-config-modal label {
+      display: block;
+      font-size: 12px;
+      color: #b8c4d2;
+      margin: 9px 0 3px;
+    }
+
+    #upload-config-modal input[type="text"],
+    #upload-config-modal input[type="email"],
+    #upload-config-modal input[type="number"] {
+      font-family: inherit;
+      font-size: 13px;
+      padding: 7px 9px;
+      border-radius: 4px;
+      border: 1px solid rgba(120, 160, 200, 0.6);
+      background: #121820;
+      color: #e6edf5;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    #upload-config-modal .row-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 12px 0 4px;
+      font-size: 13px;
+      color: #cfe2f5;
+    }
+
+    #upload-config-modal .row-check input {
+      width: 16px;
+      height: 16px;
+    }
+
+    #ucfg-error {
+      display: none;
+      color: #ffb0b0;
+      font-size: 11px;
+      margin-top: 8px;
+    }
+
+    #upload-config-modal .cfg-btns {
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+      margin-top: 16px;
+    }
+
+    #upload-config-modal button {
+      font-family: inherit;
+      font-size: 13px;
+      padding: 7px 18px;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+    }
+
+    #upload-config-modal .cfg-save {
+      background: #3f7fb8;
+      color: #fff;
+    }
+
+    #upload-config-modal .cfg-save:hover {
+      background: #4a90cc;
+    }
+
+    #upload-config-modal .cfg-cancel {
+      background: #3a3f46;
+      color: #d6dde4;
+    }
+
+    /* §60 미니맵: 좌상단(우상단 HUD 와 안 겹침). 박스 6:4(=3:2). 작게·반투명.
+         박스 안: 땅(맵 100×40, 비율 5:2)이 아래·가로 꽉, 위 나머지는 하늘(§60). main 이 표시/숨김·그리기. */
+    #minimap {
+      position: fixed;
+      left: 8px;
+      top: 8px;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      border: 1px solid rgba(140, 180, 220, 0.55);
+      border-radius: 3px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+      display: none;
+      /* main 이 줌인 시에만 표시 */
+      z-index: 12;
+      pointer-events: none;
+      /* 표시만(시야 방해 0) */
+      opacity: 0.9;
+    }
+
+    /* §55 숲 생성 버튼(#bundle-btn) CSS 폐기 — 서버 자동 묶기. */
+    /* §41 "마지막 활성 그리드 찾기"(지도 앱 내 위치): 우하단 원형 버튼. */
+    #locate-btn {
+      position: fixed;
+      right: 14px;
+      bottom: 14px;
+      width: 40px;
+      height: 40px;
+      background: rgba(28, 40, 50, 0.92);
+      border: 2px solid rgba(140, 180, 220, 0.9);
+      color: #dceaff;
+      font-size: 18px;
+      line-height: 1;
+      border-radius: 50%;
+      cursor: pointer;
+      display: none;
+      /* main 이 활성 셀 있을 때만 표시 */
+      z-index: 24;
+      pointer-events: auto;
+      box-shadow: 0 3px 14px rgba(0, 0, 0, 0.5);
+    }
+
+    #locate-btn:hover {
+      background: rgba(40, 58, 72, 0.98);
+    }
+  </style>
+</head>
+
+<body>
+  <!-- 도트 숲(월드)만 그리는 캔버스. -->
+  <canvas id="forest"></canvas>
+
+  <!-- DOM UI 오버레이(§12): 화면 고정, 줌/팬 무관. -->
+  <div id="ui">
+    <!-- 좌상단 HUD: §16-1 에서 제거됨 -->
+
+    <!-- 우상단 HUD: 5h/7d + 이번달 활성수 + 월 누적 5메트릭 (§16-1) -->
+    <!-- §20-7 토글은 패널 좌하단 안쪽. 접으면 #hud-tr-body 만 숨고 토글은 남음. -->
+    <div class="panel" id="hud-tr">
+      <div id="hud-tr-body">
+        <!-- 현재 서버 포트(앱이 포트 충돌로 자동 fallback 했을 수 있어 실제 포트 표시). -->
+        <div class="server-port">서버 :<span id="server-port">—</span></div>
+        <div class="util">
+          <span class="c-5h" id="m-fivehour">5h: —</span>
+          <span class="c-7d" id="m-sevenday">7d: —</span>
+        </div>
+        <div class="month-count">이번 달 활성 <span id="m-count">—</span></div>
+        <div class="month-label">이번 달 누적</div>
+        <div class="metric">
+          <div class="label">Input Tokens</div>
+          <div class="val cd-input" id="t-input">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Output Tokens</div>
+          <div class="val cd-output" id="t-output">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Cache Creation</div>
+          <div class="val cd-cwrite" id="t-cwrite">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Cache Read</div>
+          <div class="val cd-cread" id="t-cread">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Requests</div>
+          <div class="val cd-req" id="t-req">—</div>
+        </div>
+      </div>
+      <button id="hud-toggle" title="HUD 접기">◥</button>
+      <!-- §60-1 업로드 설정 톱니: 하단에서 우상단 HUD 영역으로 이동. 클릭→설정 모달. -->
+      <button id="upload-cfg" title="업로드 설정">⚙</button>
+    </div>
+
+    <!-- 하단 스트립 HUD: 상단 바(업로드 묶음) + 오늘자 5메트릭 (§16-1·§61). 값 = 옅은 톤(cl-*). -->
+    <div class="panel" id="hud-bottom">
+      <!-- §57·§61 업로드 상태+버튼 묶음: 패널 상단 전용 바(우측 정렬 + 구분선). 메트릭과 분리(겹침 0). -->
+      <div id="upload-row">
+        <span class="up-icon">⬆</span>
+        <span class="up-when" id="up-when">—</span>
+        <button id="upload-now" title="지금 중앙 서버로 전송">지금 전송</button>
+      </div>
+      <div id="hud-bottom-metrics">
+        <div class="metric">
+          <div class="label">Input Tokens</div>
+          <div class="sub">(Height)</div>
+          <div class="val cl-input" id="b-input">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Output Tokens</div>
+          <div class="sub">(Foliage)</div>
+          <div class="val cl-output" id="b-output">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Cache Creation</div>
+          <div class="sub">(Structure)</div>
+          <div class="val cl-cwrite" id="b-cwrite">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Cache Read</div>
+          <div class="sub">(Energy Flow)</div>
+          <div class="val cl-cread" id="b-cread">—</div>
+        </div>
+        <div class="metric">
+          <div class="label">Requests</div>
+          <div class="sub">(Vibrancy)</div>
+          <div class="val cl-req" id="b-req">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 상태 -->
+    <div id="offline">● 오프라인</div>
+    <div id="empty-note">빈 대지 — 사용량 데이터 없음</div>
+
+    <!-- §15-2 활성화 안내 -->
+    <div id="plant-prompt">🌱 오늘 나무 심을 자리를 고르세요</div>
+  </div>
+
+  <!-- 호버 툴팁 -->
+  <div id="tooltip"></div>
+  <!-- 클릭 상세 패널 -->
+  <div id="detail"></div>
+  <!-- §15-2 심기 확인 팝업 -->
+  <div id="plant-confirm">
+    <div class="cf-title">이 자리에 심을까요?</div>
+    <div class="cf-btns">
+      <button id="confirm-yes" class="cf-yes">심기</button>
+      <button id="confirm-no" class="cf-no">취소</button>
+    </div>
+  </div>
+
+  <!-- §55 숲 생성 버튼 폐기(서버 자동 묶기). -->
+
+  <!-- §41 마지막 활성 그리드 찾기(지도 앱 "내 위치"). 우하단. main 이 표시·클릭 배선. -->
+  <button id="locate-btn" title="마지막 활성 그리드로 이동">📍</button>
+
+  <!-- 자동 심기 토글: #ui(z-10 stacking context) 밖 body 직속 → z-index 47(차단 오버레이 45 위)로
+         심는 중에도 클릭 가능(이 토글만 예외, 다른 입력은 오버레이가 차단). 우상단·#hud-tr(top 8) 위.
+         main 이 onAutoPlantToggle 배선·#start-auto-plant 와 localStorage 상태 공유. -->
+  <label id="autoplant-toggle" title="켜면 미배치 날짜를 자동으로 심습니다(수동 선택 없이)">
+    <input type="checkbox" id="auto-plant" />
+    <span>자동 심기</span>
+  </label>
+
+  <!-- 심는 중 입력 차단 오버레이 + 인디케이터(#ui 밖 — #ui 는 pointer-events:none).
+         자동 점진 연출·수동 activate 왕복 동안 표시. main 이 setPlanting 으로 토글. -->
+  <div id="planting-overlay"></div>
+  <!-- 인디케이터: "심는 중" + 끄기 버튼(오버레이가 다른 입력 막아도 이 버튼은 클릭 받음). -->
+  <div id="planting-indicator">
+    <span>🌱 심는 중…</span>
+    <button id="planting-stop" title="자동 심기 끄기">자동 끄기</button>
+  </div>
+
+  <!-- §21-1 시작일 모달 (startDate=null 첫 접근 시) -->
+  <div id="start-modal">
+    <div class="card">
+      <div class="title">🌳 숲 시작일을 입력하세요</div>
+      <div class="sub">이 날부터 오늘까지 하루씩 나무를 심습니다 (과거~오늘)</div>
+      <input type="date" id="start-date-input" />
+      <!-- 자동 심기 토글: HUD #auto-plant 와 같은 localStorage 상태 공유(별도 상태 아님). -->
+      <label class="start-autoplant-row" title="켜면 시작일~오늘 미배치분을 자동으로 심습니다">
+        <input type="checkbox" id="start-auto-plant" />
+        <span>자동 심기 (방치해도 숲이 자람)</span>
+      </label>
+      <div id="start-error"></div>
+      <button id="start-confirm">시작하기</button>
+    </div>
+  </div>
+
+  <!-- §58 업로드 설정 모달 (톱니 클릭 시). main 이 GET/POST·검증·ESC 배선. -->
+  <div id="upload-config-modal">
+    <div class="card">
+      <div class="title">⚙ 업로드 설정</div>
+      <div class="sub" id="ucfg-hint">중앙 서버 전송 설정 (.env 없이 여기서 설정).</div>
+      <label for="ucfg-url">서버 주소</label>
+      <input type="text" id="ucfg-url" placeholder="http://abc.def.com" />
+      <label for="ucfg-email">이메일</label>
+      <input type="email" id="ucfg-email" placeholder="mail@abcdefg.com" />
+      <label for="ucfg-interval">전송 주기 (초)</label>
+      <input type="number" id="ucfg-interval" min="10" step="10" />
+      <div class="row-check">
+        <input type="checkbox" id="ucfg-enabled" />
+        <label for="ucfg-enabled" style="margin:0;color:#cfe2f5;">자동 전송 켜기</label>
+      </div>
+      <div id="ucfg-error"></div>
+      <div class="cfg-btns">
+        <button id="ucfg-cancel" class="cfg-cancel">취소</button>
+        <button id="ucfg-save" class="cfg-save">저장</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- §58 미니맵(줌인 시 전체 위치 파악). main rAF 가 renderer.drawMinimap 으로 그림. -->
+  <canvas id="minimap" width="150" height="100"></canvas>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+
+</html>
