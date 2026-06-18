@@ -6,7 +6,10 @@
 
 import { isPastMonth } from "./bundle-rule.js";
 
-const MOCK_DAILY_CAP = 14_000_000; // 콜드 목 단계 분모. 콜드 스타트는 빈 data 라 영향 적음.
+const MOCK_DAILY_CAP = 14_000_000; // 콜드 목 HUD cap. 콜드 스타트는 빈 data 라 영향 적음.
+// 콜드 목 단계 분모(일일누적 역대최대). 콜드 activate 는 tree.stage=empty 로만 만들어
+//   단계 분모를 실질 안 쓰지만, 실서버 dailyMaxTokens 노출과 메타 일관성을 맞춘다.
+const MOCK_DAILY_MAX = 494_853_000;
 
 /**
  * 콜드 스타트 목 응답: 빈 data + startDate(미정이면 null → 시작일 모달 트리거).
@@ -30,6 +33,8 @@ function mockColdResponse(startDate = null) {
     sevenDayPct: 78,
     fiveHourCapTokens: MOCK_DAILY_CAP / 2,
     capSource: "observed",
+    // 단계 분모(메타 일관성용). 콜드 tree 는 empty 라 단계엔 영향 없음.
+    dailyMaxTokens: MOCK_DAILY_MAX,
     generatedAt: new Date().toISOString(),
   };
 }

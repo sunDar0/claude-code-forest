@@ -358,25 +358,34 @@ export const REFMAX_SEED = Object.freeze({
   requestCount: 1372,
 });
 
-// 단계 임계(pct=totalTokens/dailyCap). 구간 폭 30:30:40 = 3:3:4 — 묘목 3·유목 3·성목 4
+// dailyMaxTokens 초기 시드 하한 — 일일 누적 토큰(usage.totalTokens)의 역대 최대 실측치.
+//   computeTree 의 단계 분모(refMax 와 동일한 단조-증가·forest.json 영속 룰)로 쓴다.
+//   refMax(메트릭별)와 별개의 단일 스칼라 — usage.totalTokens(5메트릭 합) 기준.
+//   6/11 관측 일일누적 최대(≈4.95억) 수준을 보수적 하한으로 둔다. 부팅 전체 스캔이 끌어올린다.
+export const DAILY_MAX_SEED = 494853000;
+
+// 단계 임계(pct=totalTokens/분모). 구간 폭 30:30:40 = 3:3:4 — 묘목 3·유목 3·성목 4
 // 하위 스프라이트 프레임에 균등 10%씩 대응(렌더가 stageProgress 로 하위 프레임 파생).
+// 임계(0.3/0.6)는 절대 변경 금지 — 분모만 호출부가 갈아끼운다.
 const STAGE_PCT = { young: 0.3, mature: 0.6 };
 /**
  * 그날 사용량으로 나무 단계·경험치·수종을 계산한다(클라 metrics.js 와 동일 산식).
- *   pct = totalTokens / dailyCapTokens. pct<0.20 묘목 / 0.20~0.50 유목 / 0.50~ 성목.
- *   사용량 0 → empty(빈 땅). 사용은 있는데 cap 미정/pct 극소면 최소 묘목.
+ *   pct = totalTokens / 분모. pct<0.3 묘목 / 0.3~0.6 유목 / 0.6~ 성목.
+ *   사용량 0 → empty(빈 땅). 사용은 있는데 분모 미정/pct 극소면 최소 묘목.
+ *   분모 = 일일 누적 토큰의 역대 최대(dailyMaxTokens). 호출부가 넘긴다 — HUD cap 과 별개.
+ *   역대 최대급으로 쓴 날 = pct≈1.0 = 성목 만개.
  * @param {object} usage totalTokens 를 가진 그날 usage.
- * @param {number} dailyCapTokens 일일 한도 토큰(분모).
+ * @param {number} denomTokens 단계 분모(일일누적 역대최대 dailyMaxTokens). 인자명은 무방.
  * @param {*} seed 수종 결정용 결정적 시드.
  * @returns {{stage:string, xp:number, stageProgress:number, seed:*, species:*}}
  */
-export function computeTree(usage, dailyCapTokens, seed) {
+export function computeTree(usage, denomTokens, seed) {
   const species = speciesFor(seed);
   const totalTokens = usage && usage.totalTokens > 0 ? usage.totalTokens : 0;
   if (totalTokens <= 0) {
     return { stage: 'empty', xp: 0, stageProgress: 0, seed, species };
   }
-  const cap = Number.isFinite(dailyCapTokens) && dailyCapTokens > 0 ? dailyCapTokens : 0;
+  const cap = Number.isFinite(denomTokens) && denomTokens > 0 ? denomTokens : 0;
   const pct = cap > 0 ? totalTokens / cap : 0;
 
   let stage;

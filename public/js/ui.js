@@ -19,23 +19,14 @@ function abbr(v) {
 
 const STAGE_NAMES = { 0: "빈 대지", 1: "묘목", 2: "유목", 3: "성목" };
 const NEXT_NAME = { 1: "유목", 2: "성목" }; // 묘목→유목, 유목→성목 (성목은 다음 없음)
-// 매크로 단계당 하위 단계 수: 묘목 3·유목 3·성목 4 = 10단계(스프라이트 프레임 매핑과 정합).
-const SUB_COUNT = { 1: 3, 2: 3, 3: 4 };
 
 /**
- * 매크로 단계 + 진행도 → 화면 표기("성목 2/4"). 빈 대지·미지 단계는 매크로 이름만.
- *   하위 인덱스 = floor(stageProgress · count)+1, count 로 상한(렌더 하위 프레임과 동일 산식).
+ * 매크로 단계 → 화면 표기("성목"). 하위 칸(n/m) 숫자는 쓰지 않는다 — 매크로 이름만.
  * @param {number} stage 매크로 단계(0~3).
- * @param {number} progress stageProgress 0~1.
  * @returns {string} 표기 라벨.
  */
-function stageLabel(stage, progress) {
-  const name = STAGE_NAMES[stage] || "";
-  const cnt = SUB_COUNT[stage];
-  if (!cnt) return name; // 빈 대지 등
-  const p = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
-  const idx = Math.min(cnt - 1, Math.floor(p * cnt)) + 1; // 1..cnt
-  return `${name} ${idx}/${cnt}`;
+function stageLabel(stage) {
+  return STAGE_NAMES[stage] || "";
 }
 // 수종 이름(sprites.js SPECIES tree0..4 = 초록·연두·단풍·진청록·민트 순서와 일치).
 const SPECIES_NAMES = { 0: "초록나무", 1: "연두나무", 2: "단풍나무", 3: "진청록나무", 4: "민트나무" };
@@ -252,7 +243,7 @@ export class ForestUI {
       if (info.empty) {
         html = `<div class="title">${info.date || ""}</div>빈 대지(데이터 없음)`;
       } else {
-        const stage = stageLabel(info.stage, info.stageProgress);
+        const stage = stageLabel(info.stage);
         html =
           `<div class="title">${info.date} · ${stage}</div>` +
           xpBar(info.stageProgress) +
@@ -297,7 +288,7 @@ export class ForestUI {
         `<div class="drow"><span>빈 대지(데이터 없음)</span></div>`;
     } else {
       const stage = STAGE_NAMES[info.stage] || "";
-      const stageFull = stageLabel(info.stage, info.stageProgress);
+      const stageFull = stageLabel(info.stage);
       const species = SPECIES_NAMES[info.species] != null ? SPECIES_NAMES[info.species] : "";
       const next = NEXT_NAME[info.stage];
       // 다음 단계까지: 묘목/유목은 (1 - 진행)% 남음, 성목은 max 안내.

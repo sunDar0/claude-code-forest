@@ -91,6 +91,9 @@ function setupHudToggle(renderer) {
   hudToggle.addEventListener("click", (e) => {
     e.stopPropagation();
     const collapsed = uiRoot.classList.toggle("hud-collapsed");
+    // §64: Auto 토글은 #ui 밖(body 직속)이라 hud-collapsed 자손 셀렉터가 안 닿는다 → 직접 전파.
+    const autoToggle = document.getElementById("autoplant-toggle");
+    if (autoToggle) autoToggle.classList.toggle("hud-collapsed", collapsed);
     // 대각 삼각형으로 동작 방향 암시: 펼침=우상단으로 접기(◥), 접힘=좌하단으로 펼치기(◣).
     hudToggle.textContent = collapsed ? "◣" : "◥";
     hudToggle.title = collapsed ? "HUD 펴기" : "HUD 접기";
