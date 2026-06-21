@@ -19,6 +19,9 @@ const MOCK_DIR = path.join(__dirname, '..', 'mock');
 // 목업 고정 CAP — 실서버처럼 statusline 역산을 하지 않고 데모용 상수로 둔다(목데이터 자기완결).
 // 클라 HUD 가 dailyCapTokens·fiveHourPct·sevenDayPct·capSource 를 그대로 쓸 수 있게.
 const MOCK_DAILY_CAP_TOKENS = 600_000_000;
+// 목 단계 분모(일일누적 역대최대). mock day 파일은 tree 가 이미 박혀 있어 computeTree 를 안
+//   거치므로 단계엔 영향 없지만, 메타 일관성(실서버 dailyMaxTokens 노출)을 위해 둔다.
+const MOCK_DAILY_MAX_TOKENS = 700_000_000;
 const MOCK_FIVE_HOUR_PCT = 42;
 const MOCK_SEVEN_DAY_PCT = 31;
 const MOCK_CAP_SOURCE = 'mock';
@@ -126,6 +129,8 @@ async function buildMockForest() {
     fiveHourCapTokens: Math.round(MOCK_DAILY_CAP_TOKENS / 2),
     // 목 refMax — 실서버처럼 관측 추적은 안 하고 실측 시드(REFMAX_SEED) 상수.
     refMax: { ...REFMAX_SEED },
+    // 목 단계 분모(메타 일관성용). mock day tree 는 정적이라 단계엔 영향 없음.
+    dailyMaxTokens: MOCK_DAILY_MAX_TOKENS,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -149,6 +154,8 @@ function emptyMockPayload(forestMeta) {
     fiveHourCapTokens: Math.round(MOCK_DAILY_CAP_TOKENS / 2),
     // 목 refMax — 실측 시드(REFMAX_SEED) 상수.
     refMax: { ...REFMAX_SEED },
+    // 목 단계 분모(메타 일관성용).
+    dailyMaxTokens: MOCK_DAILY_MAX_TOKENS,
     generatedAt: new Date().toISOString(),
   };
 }

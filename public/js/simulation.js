@@ -486,7 +486,10 @@ export function buildTree(params, scale = 1, maxWidth = Infinity, placement = nu
 export function buildForest(spec) {
   const ym = spec.ym || "0000-00";
   const cells = spec.cells || [];
-  const density = Math.max(0.2, Math.min(1, spec.density ?? 0.5));
+  // density 하한 제거: 사용 적은 달은 0 에 가까운 density 로 성긴 숲(기획 §8-2).
+  //   NaN/음수 방어로 clamp [0,1]·미지정은 0.5. (빈 달 듬성 효과의 density 산출은 renderer §단위2 에서 완성)
+  const rawDensity = Number.isFinite(spec.density) ? spec.density : 0.5;
+  const density = Math.max(0, Math.min(1, rawDensity));
   const originX = spec.originX || 0;
   const originY = spec.originY || 0;
 
@@ -516,10 +519,17 @@ export function buildForest(spec) {
   //   처리하면 직교 연결칸을 둘 다 추가해 2×2 가 꽉 차므로(사각 조각 재발), 같은 갭의 두
   //   직교 후보 중 시드로 **하나만** 택해 추가한다.
   const seenGaps = new Set();
+  // 멤버 셀 stage 조회용(브리지 양 끝 nonEmpty 판정에 사용).
+  const memberStage = new Map(cells.map((c) => [c.gx + "," + c.gy, c.stage]));
+  const isEmptyStage = (st) => st === STAGE.EMPTY || st === undefined || st === null;
   for (const c of cells) {
+    // empty 셀은 나무 0 이므로 그 셀로부터의 브리지(형태 연결용 나무)도 만들지 않는다.
+    if (isEmptyStage(c.stage)) continue;
     for (const [dx, dy] of DIAG) {
       const bx = c.gx + dx, by = c.gy + dy;
       if (!memberSet.has(bx + "," + by)) continue; // 대각 이웃이 멤버여야 코너 접촉
+      // 브리지는 nonEmpty 멤버끼리만 잇는다(empty 사이 브리지=나무 0, 바닥만).
+      if (isEmptyStage(memberStage.get(bx + "," + by))) continue;
       // 갭 키 = 두 대각 셀 좌표를 정렬한 단일 키(양쪽 셀이 같은 키 → 갭당 1회). 좌표 비교로 정렬.
       const aKey = c.gx + "," + c.gy, bKey = bx + "," + by;
       const gapKey = aKey < bKey ? aKey + "|" + bKey : bKey + "|" + aKey;
@@ -573,6 +583,9 @@ export function buildForest(spec) {
     let cellTrees = perCell;
     if (isBoundary) cellTrees = Math.max(1, Math.min(maxPer, perCell + (((rng() * 3) | 0) - 1)));
     if (cell.bridge) cellTrees = 1; // 브리지 셀은 작은 나무 1그루만(코너 갭 잇기 — 과밀 방지)
+    // empty 셀(토큰 0)은 나무를 심지 않는다(기획 §8-2 빈 날 듬성). 바닥(closedCells/bbox)은 유지.
+    //   브리지 셀은 nonEmpty 멤버 사이에서만 만들어졌으므로 여기서 empty 가 아니다.
+    if (!cell.bridge && isEmptyStage(cell.stage)) cellTrees = 0;
     const placed = []; // 이 셀에 심은 밑동(월드 px) — 최소 간격 리젝션용
     for (let i = 0; i < cellTrees; i++) {
       // 최소 간격 리젝션: 후보를 몇 번 뽑아 기존 그루와 minGap 이상 떨어진 위치를 채택.

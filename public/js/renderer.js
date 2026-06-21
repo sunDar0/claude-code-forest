@@ -48,6 +48,18 @@ import { Camera } from "./render/camera.js";
 // 그리드 1칸 = 3×3 타일(= GRID). 줌인 끝 = 이게 화면을 꽉 채우는 배율.
 const CELL_SPAN = GRID; // 한 그리드 월드 px = 3*TILE = 96
 
+// 식생(풀·그늘·흙) 렌더 계수를 한 객체로 모은다 — 단위 4 트윅 패널이 이걸 드래그로 수정한다.
+//   렌더 코드는 하드코딩 대신 이 값을 읽는다. 단위 2 가 실제 소비하는 키는 D(shadowRadiusFactor·
+//   shadowGrassAtten·grassLushness)뿐. forestDensityCoef·boundaryNoise 는 정의만 — 단위 3·4가 연결.
+const VEG_TWEAKS = {
+  shadowRadiusFactor: 0.6,  // 그늘 반경 = 나무 스프라이트 실제 너비 × 이 값(=풀잎이 나는 영역)
+  grassLushness: 1.4,       // 풀잎 가닥 밀도 + 크기 계수(>1 더 많고 더 큼, <1 성김)
+  soilAmount: 0.5,          // 밑동 그늘 흙 비율("약간") — 흙 도트는 작게(빈 대지 흙자국과 같은 1px)
+  shadowGrassAtten: 0.6,    // 그늘 중심에서 풀 감쇠 최대 강도(0~1) — 밑동에 닿을수록 1
+  forestDensityCoef: 1.05,  // 군집 밀도 계수(단위 3에서 buildForest 와 연결)
+  boundaryNoise: 1.5,       // 경계 섞임 강도(단위 3에서 전이대 amp 와 연결)
+};
+
 /**
  * 도트 숲 캔버스 렌더러. 일간 사용량 데이터를 받아 그리드 위 나무·묶인 달 숲 군집·바닥/식생·
  * 파티클을 백버퍼에 그리고 화면에 업스케일한다. 카메라 줌/팬·오버뷰 스냅샷·스프라이트 베이크
@@ -70,6 +82,7 @@ export class ForestRenderer {
     this.hudCollapsed = false; // HUD 접힘(main 이 설정). 접히면 마지막 활성 금색 아웃라인도 숨김.
 
     this.cells = []; // layoutByPlacements 결과
+    this._shadeStumps = []; // 이번 프레임 나무 밑동 그늘(D·E·F) — _collectShadeStumps 가 채움
     this.bakedByDate = new Map(); // date → buildTree 결과
     this.cellByKey = new Map(); // "gx,gy" → cell (데이터 타일 빠른 조회)
 
@@ -77,6 +90,10 @@ export class ForestRenderer {
     this.forests = {}; // ym → { month, bundled, bundledAt, monthly }
     this.drilldownMonth = null; // 펼친(드릴다운) 달 "YYYY-MM" — 그 달은 일 그리드로 표시
     this.forestBlobs = []; // 묶인 달의 숲 군집 [{ ym, cgx, cgy, r, density, trees, ... }]
+    // 묶인 숲 닫힌 발자국(C·단위3): 모든 군집의 closedCells("gx,gy") 집합. 빈 셀·브리지 셀이
+    //   cellByKey 에 없어도 바닥 종류를 "forest" 로 분류해 셀 사이 흙 구멍을 없앤다(연속 바닥).
+    //   파생 렌더 상태일 뿐 — 베이크 키·_contentSignature·무효화와 무관(§28 프리즈 0).
+    this.bundledFootprint = new Set();
     // 숲 군집 캐시: ym → { instances, bbox, drawBBox, members, ... }.
     //   buildForest + 그루별 buildTree 를 ym 단위로 1회 베이크(프레임마다 재생성 금지).
     this.forestTrees = new Map();
@@ -803,6 +820,33 @@ export class ForestRenderer {
    * 묶인(펼침 아닌) 달마다 숲 군집(blob)을 산출. 멤버 셀(그리드) 좌표 목록을 보존해 나무를 각 멤버
    * 셀의 실제 그리드 영역에 심으므로 군집 모양 = 그리드 묶음 모양(드릴다운 전후 위치 자동 일치).
    */
+  /**
+   * 단위4 식생 트윅 적용(디버그 슬라이더 전용). VEG_TWEAKS 키 1개를 갱신하고, 필요한 재계산만 한다.
+   *   - 일반 폴 무영향: 이 메서드는 슬라이더 드래그(명시적 트윅) 시에만 호출된다. _contentSignature·setData
+   *     시그니처에는 VEG_TWEAKS 가 안 들어가므로 같은 내용 폴 → 재베이크 0·무효화 0(§28 프리즈 0).
+   *   - shadow·grass: 바닥 라이브 패스라 다음 프레임 자동 반영. 재계산 불필요.
+   *   - boundaryNoise: 경계도 라이브 ground 패스라 자동 반영. (둘 다 오버뷰 스냅샷엔 구워져 있어 무효화.)
+   *   - forestDensityCoef: 군집 density 가 바뀌므로 _computeForestBlobs 재실행 → density 시그니처 변경 →
+   *     _computeForestClusters 가 그 달 forestSprites/forestTrees 무효화·재베이크.
+   * @param {string} key VEG_TWEAKS 키
+   * @param {number} val 새 값
+   */
+  setVegTweak(key, val) {
+    if (!Object.prototype.hasOwnProperty.call(VEG_TWEAKS, key)) return;
+    VEG_TWEAKS[key] = val;
+    if (key === "forestDensityCoef") {
+      // 군집 밀도 재산출 → sig 변경 → 군집 스프라이트 재베이크(명시적 트윅이라 §28 예외).
+      this._computeForestBlobs();
+    }
+    // 바닥·경계·숲은 오버뷰 스냅샷에 구워져 있으므로 무효화(다음 합성에서 새 트윅 반영, 이중버퍼로 플래시 0).
+    this._invalidateSnapshot();
+  }
+
+  /** 현재 VEG_TWEAKS 스냅샷(트윅 패널 초기값용). */
+  getVegTweaks() {
+    return { ...VEG_TWEAKS };
+  }
+
   _computeForestBlobs() {
     const byMonth = new Map();
     for (const cell of this.cells) {
@@ -828,7 +872,11 @@ export class ForestRenderer {
       // 밀도: 총사용량(로그) → 그루 밀도·단계분포. monthly.totalTokens 있으면 그걸 우선.
       const f = this.forests[ym];
       const monthlyTotal = f && f.monthly ? (f.monthly.totalTokens || total) : total;
-      const density = Math.max(0.2, Math.min(1, Math.log10(1 + monthlyTotal) / 8));
+      // VEG_TWEAKS.forestDensityCoef(단위4 트윅): 군집 그루 밀도 계수. density 가 sig 에 들어가
+      //   (_computeForestClusters) 계수가 바뀌면 다음 _computeForestBlobs 에서 sig 가 달라져 재베이크된다.
+      //   단 일반 폴은 setData 가 _contentSig 로 조기반환 → 이 함수 자체가 안 불려 재베이크 0(§28).
+      const densRaw = Math.log10(1 + monthlyTotal) / 8 * VEG_TWEAKS.forestDensityCoef;
+      const density = Math.max(0.2, Math.min(1, densRaw));
       blobs.push({ ym, cgx, cgy, members, density, trees, dayCount: n });
     }
     this.forestBlobs = blobs;
@@ -899,6 +947,14 @@ export class ForestRenderer {
         drawDown: draw.drawDown,
         members: floorCells, // 군집 바닥(닫힌 셀 발자국)용
       });
+    }
+    // C: 모든 살아있는 군집의 닫힌 발자국(closedCells)을 한 집합에 모은다. 캐시가 증분(미변경 달은
+    //   continue)이라도 매번 전 군집을 순회해 재구성한다 — 드릴다운/언번들로 사라진 달이 빠져야 한다.
+    //   순수 파생(렌더용)이라 베이크·무효화와 무관.
+    this.bundledFootprint = new Set();
+    for (const [ym, ft] of this.forestTrees) {
+      if (this.drilldownMonth === ym) continue; // 펼친 달은 일 그리드로 — 숲 바닥 아님
+      for (const m of ft.members || []) this.bundledFootprint.add(m.gx + "," + m.gy);
     }
   }
 
@@ -1269,6 +1325,10 @@ export class ForestRenderer {
     for (const fb of this.forestBlobs) {
       const cluster = this.forestTrees.get(fb.ym);
       if (!cluster || !cluster.bbox) continue;
+      // 그루 0(전부 empty 인 묶인 달)은 베이크할 스프라이트가 없다(_forestSprite=null). 바닥은
+      //   ground 패스가 bundledFootprint 로 그리므로 "구울 게 없음 = 완성"으로 본다. 이 가드가
+      //   없으면 영영 false → 합성 미도달 → 임시본(균일 초록 + 숲 bbox 사각)이 고정 노출(회귀).
+      if (!cluster.instances || cluster.instances.length === 0) continue;
       const sp = this.forestSprites.get(fb.ym);
       if (!sp || sp.sig !== cluster.sig || !sp.done) return false;
     }
@@ -1469,8 +1529,12 @@ export class ForestRenderer {
 
     // 풀↔흙 전이대 파라미터(베이스 ①·결 텍스처 ② 공용). STEP=도트 블록, TRANS_AMP=전이대 폭(타일).
     const STEP = 2; // 도트 감성: 2px 블록 단위 분류(안티앨리어싱 0·정수)
-    const TRANS_AMP = 1.2; // 전이대 폭(타일) ±1.2 ≈ 1~1.5타일
-    const TRANS_DITHER = 1.0; // 디더 띠 폭(타일) — 경계 근처 블록이 두 종류 도트로 섞이는 범위
+    // 그리드 간 경계 노이즈 강도 = VEG_TWEAKS.boundaryNoise(단위3 연결). 전이대 폭·디더 띠 폭을
+    //   함께 스케일한다. 그리드 내부 9타일은 같은 종류라 isGroundBoundaryTile=false → 노이즈 없이
+    //   solid(이음매 0). 노이즈는 종류가 다른 그리드 간 경계 타일에만 작동(§40 유지).
+    const bN = Math.max(0, VEG_TWEAKS.boundaryNoise);
+    const TRANS_AMP = 1.2 * bN; // 전이대 폭(타일) ±1.2 ≈ 1~1.5타일
+    const TRANS_DITHER = 1.0 * bN; // 디더 띠 폭(타일) — 경계 근처 블록이 두 종류 도트로 섞이는 범위
 
     // 바닥 베이스: ① 풀밭 한 톤. 맵 밖은 비우므로 맵 타일 범위의 화면 사각형만 풀밭으로 채운다.
     {
@@ -1542,8 +1606,10 @@ export class ForestRenderer {
     }
 
     // ② 결 텍스처(활성=잔디결 / 비활성=얼룩+잡초) — 비용 큼 → 줌아웃(LOD)에선 생략.
-    //    (활성 나무 발치 흙 패치는 폐기 — 나무는 풀밭 위에 그대로.)
+    //    활성 풀결은 나무 밑동 그늘(D)에 따라 점진 감쇠하고, 그늘 안엔 흙을 소량 복원(E).
+    //    그늘 밑동 좌표는 _collectShadeStumps 로 이번 프레임 한 번만 모은다(월드 좌표·팬 불변·결정적).
     if (!lod) {
+      this._shadeStumps = this._collectShadeStumps(ox, oy, W, H);
       for (let ty = tyMin; ty <= tyMax; ty++) {
         for (let tx = txMin; tx <= txMax; tx++) {
           const sx = tox + tx * TILE, sy = toy + ty * TILE;
@@ -1552,7 +1618,12 @@ export class ForestRenderer {
           if (this._isGroundBoundaryTile(tx, ty)) {
             this._drawTransitionDetail(b, sx, sy, tx, ty, TRANS_AMP, TRANS_DITHER);
           } else if (this._isActiveTile(tx, ty)) {
-            drawGrassBlades(b, sx, sy, tx, ty);
+            // D: 타일 중심에서 가장 가까운 밑동 거리 → 그늘. grassLushness 로 그늘 밖 무성도 보정.
+            const sh = this._shadeAt(sx + TILE / 2, sy + TILE / 2);
+            const atten = 1 - VEG_TWEAKS.grassLushness * (1 - sh.atten); // lush>1 → 풀↑(atten<0 → 가닥 ↑)
+            // E: 그늘(=밑동 근처) 안이면 흙을 약간 먼저 깔고, 그 위에 풀잎(감쇠된 가닥)을 덧그린다.
+            if (sh.soil > 0) this._drawShadeSoil(b, sx, sy, tx, ty, sh.soil);
+            drawGrassBlades(b, sx, sy, tx, ty, atten, VEG_TWEAKS.grassLushness);
           } else if (bk) {
             drawClosedGround(b, sx, sy, tx, ty); // 닫힘 = 그 달 톤 옅은 이끼/풀
           } else if (this._isBundledTile(tx, ty)) {
@@ -1712,16 +1783,23 @@ export class ForestRenderer {
       const sc = gridToScreen(h.gx, h.gy, ox, oy); // 칸 중심(§52-4)
       b.strokeRect((sc.x - GRID / 2) | 0, (sc.y - GRID / 2) | 0, GRID, GRID);
     }
-    // 묶인 숲(footprint bbox 외곽선).
+    // 묶인 숲: bbox 사각 외곽선이 아니라 멤버 셀별 채움 글로우 + 은은한 펄스.
+    //   군집은 모양이 들쭉날쭉하므로 큰 네모 대신 실제 멤버 셀 footprint 만 옅게 빛낸다.
+    //   셀 좌표는 _drawForestFloor 와 동일 식(중심 = ox+m.gx*GRID, footprint = 중심±GRID/2, §52-4).
     if (this.hoverForestYm) {
       const cl = this.forestTrees.get(this.hoverForestYm);
-      const bb = cl && cl.bbox;
-      if (bb) {
-        const x0 = (ox + (bb.x0 - this.worldOriginX)) | 0;
-        const y0 = (oy + (bb.y0 - this.worldOriginY)) | 0;
-        const w = Math.max(1, (bb.x1 - bb.x0) | 0);
-        const hgt = Math.max(1, (bb.y1 - bb.y0) | 0);
-        b.strokeRect(x0, y0, w, hgt);
+      const members = cl && cl.members;
+      if (members && members.length) {
+        const half = (GRID / 2) | 0;
+        // 펄스: frame 사인으로 alpha 약하게 맥동(0.10~0.22). 진폭 작게·녹색·채움이라 깃발/금가루와 구분.
+        //   frame 기반이라 결정적(Math.random 금지).
+        const pulse = 0.16 + 0.06 * Math.sin(this.frame * 0.06);
+        b.fillStyle = `rgba(170,225,150,${pulse.toFixed(3)})`;
+        for (const m of members) {
+          const cx = (ox + m.gx * GRID) | 0;
+          const cy = (oy + m.gy * GRID) | 0;
+          b.fillRect((cx - half) | 0, (cy - half) | 0, GRID, GRID);
+        }
       }
     }
   }
@@ -1804,6 +1882,9 @@ export class ForestRenderer {
           const phase = rnd() * 6.283; // 가닥별 흔들림 위상(시드 결정적)
           const bx = (sx + (rnd() - 0.5) * 2 * reach) | 0;
           const byBase = (sy + (rnd() - 0.5) * 2 * reach * 0.66) | 0; // 밑동 y
+          // D(공통 F): 군집 나무 밑동 그늘 안이면 가닥을 확률로 스킵 — 활성 풀밭과 같은 _shadeAt 로직.
+          const sh = this._shadeAt(bx, byBase);
+          if (sh.atten > 0 && rnd() < sh.atten) continue;
           const r = rnd();
           if (r < 0.16) {
             // 반짝 점: 줄기 없음(밑동만).
@@ -2511,6 +2592,90 @@ export class ForestRenderer {
     b.drawImage(sp.canvas, (sx - sp.ax) | 0, (baseY - sp.ay) | 0);
   }
 
+  // 그늘 밑동 수집(D·E·F): 이번 프레임 그릴 나무 밑동의 월드 좌표(wx,wy)와 그늘 반경(rad)을 한 번 모은다.
+  //   풀(바닥) 패스가 _shadeAt 로 가장 가까운 밑동을 조회한다. 화면 범위(tox/toy 기준 컬링된 그리드/숲)만
+  //   모아 작업집합 = 보이는 칸 수십 개. 월드 좌표라 팬 불변·결정적. 베이크와 무관(매 프레임 바닥 패스).
+  //   반경 = _footprintWidth(stage) × shadowRadiusFactor — 단계별 자동 비례(묘목<유목<성목). 시트 blit dw 도
+  //   _sheetTargetWidth=_footprintWidth(MATURE)×1.15 로 정규화돼 같은 비례라 절차/시트 공통 기준.
+  _collectShadeStumps(ox, oy, W, H) {
+    const stumps = [];
+    const MARGIN = GRID * 2;
+    const rf = VEG_TWEAKS.shadowRadiusFactor;
+    // 활성 그리드: 각 셀 placement 밑동(나무 그리기와 동일 식: gridToScreen + offsetTiles, baseY=sy+5).
+    for (const cell of this.cells) {
+      if (cell.params.stage === STAGE.EMPTY) continue; // empty=나무 없음 → 그늘 0(D 자동)
+      if (cell.bundled) continue; // 묶인 달은 숲 instances 로(아래)
+      const sc = gridToScreen(cell.gx, cell.gy, ox, oy);
+      const off = cell.placement ? cell.placement.offsetTiles : { x: 0, y: 0 };
+      const sx = sc.x + off.x * TILE;
+      const sy = sc.y + off.y * TILE + 5; // baseY
+      if (sx < -MARGIN || sx > W + MARGIN || sy < -MARGIN || sy > H + MARGIN) continue;
+      const fw = this._footprintWidth(cell.params.stage);
+      if (!Number.isFinite(fw)) continue;
+      stumps.push({ wx: sx, wy: sy, rad: fw * rf });
+    }
+    // 묶인 숲: forest.instances 밑동(월드 px wx/wy). 같은 그늘 로직(F 공통).
+    for (const fb of this.forestBlobs) {
+      const cluster = this.forestTrees.get(fb.ym);
+      if (!cluster) continue;
+      const insts = cluster.instances || [];
+      for (const inst of insts) {
+        const sx = ox + (inst.wx - this.worldOriginX);
+        const sy = oy + (inst.wy - this.worldOriginY);
+        if (sx < -MARGIN || sx > W + MARGIN || sy < -MARGIN || sy > H + MARGIN) continue;
+        // 군집 그루는 scale(0.4~1.0)로 묘목~성목. 폭 ≈ _footprintWidth(MATURE)×scale 근사.
+        const fw = this._footprintWidth(STAGE.MATURE) * (inst.scale || 0.5);
+        stumps.push({ wx: sx, wy: sy, rad: fw * rf });
+      }
+    }
+    return stumps;
+  }
+
+  // E 활성 그리드 흙: 그늘(밑동 근처) 안 타일에 흙 도트를 §40식 월드 노이즈로 소량 복원한다.
+  //   풀이 주·흙은 보조 — soil(≤0.35) 보다 노이즈가 큰 블록만 흙(=일부만). 흙 3색은 비활성 흙과 통일.
+  //   **흙 도트 크기 = 1px**(빈 대지 흙자국 drawEmptyDirtPatch 의 1×1 도트와 동일·기존 2px 블록의 1/4).
+  //   블록 격자 STEP=2 는 노이즈 샘플 간격으로 유지하되, 찍는 도트는 격자 중심에 1×1 만.
+  _drawShadeSoil(b, sx, sy, tx, ty, soil) {
+    const STEP = 2; // 노이즈 샘플 간격(흙 도트 자체는 1px — 기존 도트 치수의 1/4)
+    const x0 = sx | 0, y0 = sy | 0;
+    for (let by = 0; by < TILE; by += STEP) {
+      for (let bx = 0; bx < TILE; bx += STEP) {
+        const u = tx + (bx + STEP / 2) / TILE; // 블록 중심 월드 타일좌표(팬 불변)
+        const v = ty + (by + STEP / 2) / TILE;
+        const n = fbm(u * 1.6, v * 1.6, 0); // §40식 월드 노이즈(0~1)
+        if (n >= soil) continue; // soil 보다 큰 블록은 풀 유지 — 흙은 "약간"만
+        // 3색 변주(블록 월드좌표 해시·팬 불변). 비활성 흙과 같은 pendDirt 3색.
+        const vv = (((((u * 4) | 0) * 374761393) ^ (((v * 4) | 0) * 668265263)) >>> 0) % 3;
+        b.fillStyle = vv === 0 ? PAL.pendDirtA : vv === 1 ? PAL.pendDirtB : PAL.pendDirtC;
+        // 도트 1px(빈 대지 흙자국과 동일 치수): 블록 좌상단 대신 블록 중심 근처 1px.
+        b.fillRect(x0 + bx, y0 + by, 1, 1);
+      }
+    }
+  }
+
+  // 그늘 조회(F 공통): 화면 좌표(sx,sy)에서 가장 가까운 밑동까지 거리를 보고 풀 감쇠(atten)와
+  //   흙 비율(soil)을 반환. 그늘(=풀잎 영역) 안에선 밑동에 가까울수록 풀잎이 적고(그늘) 흙이 약간
+  //   드러난다. 흙 영역도 이 그늘 반경 안(밑동 근처)이다. 그늘 반경 밖이면 {atten:0, soil:0}(무성).
+  //   이진 아닌 거리 점진(반경 0 → 중심 1·선형). _shadeStumps 가 비면 전부 무성. empty 셀은 가까운
+  //   밑동이 없어 자동 0.
+  _shadeAt(sx, sy) {
+    const stumps = this._shadeStumps;
+    if (!stumps || stumps.length === 0) return { atten: 0, soil: 0 };
+    let best = Infinity; // 가장 강한 그늘(반경 대비 가장 깊이 든) 우선
+    for (let i = 0; i < stumps.length; i++) {
+      const st = stumps[i];
+      const dx = sx - st.wx, dy = sy - st.wy;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d >= st.rad) continue; // 반경 밖
+      const t = d / st.rad; // 0(밑동) ~ 1(반경 끝)
+      if (t < best) best = t;
+    }
+    if (best === Infinity) return { atten: 0, soil: 0 };
+    const depth = 1 - best; // 1(밑동) ~ 0(반경 끝)
+    const atten = depth * VEG_TWEAKS.shadowGrassAtten; // 풀 감쇠
+    const soil = depth * VEG_TWEAKS.soilAmount; // 밑동 근처 흙 비율("약간")
+    return { atten, soil };
+  }
 
   // ===================== UI 데이터 노출 (DOM 오버레이용) =====================
   // 캔버스에 UI 를 안 그린다. DOM(main.js)이 아래 getter 로 텍스트·표시를 갱신한다.

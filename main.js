@@ -24,6 +24,7 @@ function createWindow(port) {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
+    minWidth: 780,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

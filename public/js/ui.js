@@ -19,23 +19,14 @@ function abbr(v) {
 
 const STAGE_NAMES = { 0: "빈 대지", 1: "묘목", 2: "유목", 3: "성목" };
 const NEXT_NAME = { 1: "유목", 2: "성목" }; // 묘목→유목, 유목→성목 (성목은 다음 없음)
-// 매크로 단계당 하위 단계 수: 묘목 3·유목 3·성목 4 = 10단계(스프라이트 프레임 매핑과 정합).
-const SUB_COUNT = { 1: 3, 2: 3, 3: 4 };
 
 /**
- * 매크로 단계 + 진행도 → 화면 표기("성목 2/4"). 빈 대지·미지 단계는 매크로 이름만.
- *   하위 인덱스 = floor(stageProgress · count)+1, count 로 상한(렌더 하위 프레임과 동일 산식).
+ * 매크로 단계 → 화면 표기("성목"). 하위 칸(n/m) 숫자는 쓰지 않는다 — 매크로 이름만.
  * @param {number} stage 매크로 단계(0~3).
- * @param {number} progress stageProgress 0~1.
  * @returns {string} 표기 라벨.
  */
-function stageLabel(stage, progress) {
-  const name = STAGE_NAMES[stage] || "";
-  const cnt = SUB_COUNT[stage];
-  if (!cnt) return name; // 빈 대지 등
-  const p = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
-  const idx = Math.min(cnt - 1, Math.floor(p * cnt)) + 1; // 1..cnt
-  return `${name} ${idx}/${cnt}`;
+function stageLabel(stage) {
+  return STAGE_NAMES[stage] || "";
 }
 // 수종 이름(sprites.js SPECIES tree0..4 = 초록·연두·단풍·진청록·민트 순서와 일치).
 const SPECIES_NAMES = { 0: "초록나무", 1: "연두나무", 2: "단풍나무", 3: "진청록나무", 4: "민트나무" };
@@ -152,6 +143,35 @@ export class ForestUI {
   }
 
   /**
+   * 단위4 식생 트윅 슬라이더 패널 초기화(디버그 전용). main 이 debug 모드일 때만 호출한다 —
+   * 안 부르면 패널은 display:none 으로 숨고 어떤 이벤트도 안 붙는다(프로덕션 무영향).
+   *   - 각 슬라이더 초기값 = renderer.getVegTweaks()[key], 현재값 텍스트도 동기.
+   *   - input(드래그) → renderer.setVegTweak(key, val) 로 식생만 재반영(§28: 슬라이더 조작 시에만
+   *     무효화, 일반 폴은 무영향). main 의 rAF 루프가 항상 돌아 다음 프레임에 화면 반영되므로
+   *     별도 render() 호출 불필요.
+   * @param {Object} renderer setVegTweak/getVegTweaks 를 가진 렌더러.
+   */
+  initVegTweaks(renderer) {
+    const panel = document.getElementById("veg-tweaks");
+    if (!panel) return;
+    const cur = renderer.getVegTweaks ? renderer.getVegTweaks() : {};
+    const sliders = panel.querySelectorAll('input[type="range"][data-key]');
+    sliders.forEach((slider) => {
+      const key = slider.dataset.key;
+      const valEl = slider.parentElement.querySelector(".vt-val");
+      const init = Number.isFinite(cur[key]) ? cur[key] : Number(slider.value);
+      slider.value = String(init);
+      if (valEl) valEl.textContent = init.toFixed(2);
+      slider.addEventListener("input", () => {
+        const v = Number(slider.value);
+        if (valEl) valEl.textContent = v.toFixed(2);
+        renderer.setVegTweak(key, v);
+      });
+    });
+    panel.style.display = "block";
+  }
+
+  /**
    * 로컬 오늘 날짜를 "YYYY-MM-DD" 로 반환한다(모달 입력 max·검증용).
    * @returns {string} 오늘 날짜.
    */
@@ -252,7 +272,7 @@ export class ForestUI {
       if (info.empty) {
         html = `<div class="title">${info.date || ""}</div>빈 대지(데이터 없음)`;
       } else {
-        const stage = stageLabel(info.stage, info.stageProgress);
+        const stage = stageLabel(info.stage);
         html =
           `<div class="title">${info.date} · ${stage}</div>` +
           xpBar(info.stageProgress) +
@@ -297,7 +317,7 @@ export class ForestUI {
         `<div class="drow"><span>빈 대지(데이터 없음)</span></div>`;
     } else {
       const stage = STAGE_NAMES[info.stage] || "";
-      const stageFull = stageLabel(info.stage, info.stageProgress);
+      const stageFull = stageLabel(info.stage);
       const species = SPECIES_NAMES[info.species] != null ? SPECIES_NAMES[info.species] : "";
       const next = NEXT_NAME[info.stage];
       // 다음 단계까지: 묘목/유목은 (1 - 진행)% 남음, 성목은 max 안내.

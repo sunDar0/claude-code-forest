@@ -12,7 +12,7 @@
 import { readFile, writeFile, readdir, mkdir, access, rename } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { aggregateForStore, todayLocalYMD, computeTree, REFMAX_SEED } from './aggregate.js';
+import { aggregateForStore, todayLocalYMD, computeTree, REFMAX_SEED, DAILY_MAX_SEED } from './aggregate.js';
 import { isPastMonth } from '../public/js/bundle-rule.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -76,6 +76,9 @@ const mem = {
   years: new Map(),
   // 메트릭별 관측 최대(단조 증가). forest.json 메타에 영속. 분모는 클라가 쓴다.
   refMax: { ...REFMAX_SEED },
+  // 일일 누적 토큰(usage.totalTokens)의 역대 최대(단조 증가). forest.json 메타에 영속.
+  //   computeTree 의 단계 분모 전용 — HUD cap(caps.dailyCapTokens)·식생 refMax 와 별개.
+  dailyMaxTokens: DAILY_MAX_SEED,
   caps: {
     dailyCapTokens: 2,
     fiveHourPct: null,
@@ -155,6 +158,47 @@ async function persistRefMax() {
 }
 
 // ---------------------------------------------------------------------------
+// dailyMaxTokens — 일일 누적 토큰(usage.totalTokens)의 역대 최대(단조 증가).
+//   refMax 와 완전히 동일한 룰(시드 하한·단조·부팅 전체스캔·폴 bump·forest.json 영속)을
+//   단일 스칼라용으로 본뜬다. computeTree 단계 분모 전용 — HUD cap·식생 refMax 와 무관.
+// ---------------------------------------------------------------------------
+// 저장값(forest.dailyMaxTokens) + 시드 하한을 합쳐 유효한 단조 하한을 만든다(부분 누락 방어).
+function normalizeDailyMax(stored) {
+  let out = DAILY_MAX_SEED;
+  if (typeof stored === 'number' && isFinite(stored) && stored > out) out = stored;
+  return out;
+}
+
+// 그날 누적(usage 5메트릭 합)이 저장값보다 크면 갱신(단조 증가). 갱신됐으면 true.
+//   "그날 누적" = computeTree 가 쓰는 usage.totalTokens 와 같은 값(일 파일 tree.xp 와 일치).
+function bumpDailyMax(usageSchema) {
+  const total = totalOf(usageSchema);
+  if (typeof total === 'number' && isFinite(total) && total > mem.dailyMaxTokens) {
+    mem.dailyMaxTokens = total;
+    return true;
+  }
+  return false;
+}
+
+// 메모리의 모든 날(과거+오늘)을 훑어 dailyMaxTokens 를 끌어올린다(부팅 1회).
+function bumpDailyMaxFromAllDays() {
+  let changed = false;
+  for (const [, day] of mem.days) {
+    if (day && day.usage) {
+      if (bumpDailyMax(day.usage)) changed = true;
+    }
+  }
+  return changed;
+}
+
+// dailyMaxTokens 갱신을 forest.json 메타에 영속(forest 객체에 묻혀 같이 기록).
+async function persistDailyMax() {
+  if (!mem.forest) return;
+  mem.forest.dailyMaxTokens = mem.dailyMaxTokens;
+  await writeJson(forestPath(), mem.forest);
+}
+
+// ---------------------------------------------------------------------------
 // 부팅: data/ 로드 + 없으면 생성 + 과거 동결
 // ---------------------------------------------------------------------------
 /**
@@ -171,19 +215,29 @@ export async function boot() {
   let forest = await readJson(forestPath());
   if (!forest || typeof forest !== 'object') {
     const year = yearOf(today);
-    // forest.json 부재 시 refMax 를 실측 최대(REFMAX_SEED)로 시드.
-    forest = { startDate: null, activeYear: year, stages: [year], refMax: { ...REFMAX_SEED } };
+    // forest.json 부재 시 refMax·dailyMaxTokens 를 실측 시드로 초기화.
+    forest = {
+      startDate: null,
+      activeYear: year,
+      stages: [year],
+      refMax: { ...REFMAX_SEED },
+      dailyMaxTokens: DAILY_MAX_SEED,
+    };
     await writeJson(forestPath(), forest);
   }
   mem.forest = forest;
   // 저장값(있으면) + 시드 합쳐 모든 키 채운 refMax 로 메모리 초기화(단조 하한 = 시드).
   mem.refMax = normalizeRefMax(forest.refMax);
+  // 저장값(있으면) + 시드 하한 합쳐 dailyMaxTokens 메모리 초기화(단조 하한 = 시드).
+  mem.dailyMaxTokens = normalizeDailyMax(forest.dailyMaxTokens);
 
   // 2) data/ 전체 스캔 → days/months/years 메모리 로드
   await loadAllFromDisk();
 
   // 기존 일 파일들의 그날 합으로 refMax 단조 갱신(부팅 1회). 변동 시 forest.json 영속.
   if (bumpRefMaxFromAllDays()) await persistRefMax();
+  // 기존 일 파일들의 일일누적으로 dailyMaxTokens 단조 갱신(부팅 1회). 변동 시 영속.
+  if (bumpDailyMaxFromAllDays()) await persistDailyMax();
 
   // 3) 첫 집계 1회 — caps 채우고, 오늘자 갱신(활성이면)
   await refreshToday();
@@ -300,10 +354,15 @@ export async function refreshToday() {
 
   const usage = agg.byDate.get(today) || zeroUsage();
   day.usage = toUsageSchema(usage);
-  day.tree = computeTree(usage, agg.dailyCapTokens, day.tree ? day.tree.seed : today);
+  // 단계 분모 갱신을 computeTree 전에 — 오늘 누적이 새 역대최대면 그 값으로 분모를 올려
+  //   pct≈1.0(성목 만개)이 되게 한다(refMax 와 동일 단조-증가 룰).
+  const dailyMaxChanged = bumpDailyMax(day.usage);
+  // 단계 분모 = 일일누적 역대최대(dailyMaxTokens). HUD cap(agg.dailyCapTokens)과 별개.
+  day.tree = computeTree(usage, mem.dailyMaxTokens, day.tree ? day.tree.seed : today);
   day.finalized = false;
-  // 오늘 그날 합이 더 크면 refMax 단조 갱신 → forest.json 영속.
+  // 오늘 그날 합이 더 크면 refMax·dailyMaxTokens 단조 갱신 → forest.json 영속.
   if (bumpRefMax(usageToRefMetrics(day.usage))) await persistRefMax();
+  if (dailyMaxChanged) await persistDailyMax();
   await persistDay(day); // 오늘 파일 1개만 기록
 }
 
@@ -481,6 +540,8 @@ export function getForest() {
     fiveHourCapTokens: mem.caps.fiveHourCapTokens,
     // 메트릭별 관측 최대(단조 증가) — 클라 metrics.js 가 정규화 분모로 쓴다.
     refMax: { ...mem.refMax },
+    // 일일누적 역대최대 — 서버 computeTree 단계 분모(참고용 노출, 클라 단계 재계산엔 안 씀).
+    dailyMaxTokens: mem.dailyMaxTokens,
     generatedAt: mem.caps.generatedAt,
   };
 }
@@ -558,9 +619,12 @@ export async function activateGrid({ date, gx, gy }) {
   };
   const usage = agg.byDate.get(date) || zeroUsage();
   const usageSchema = toUsageSchema(usage);
-  const tree = computeTree(usage, agg.dailyCapTokens, date); // 사용량 0 → stage:empty
-  // 활성화하는 날의 그날 합으로 refMax 단조 갱신(과거 날짜 활성화 포함).
+  // 단계 분모 갱신을 computeTree 전에(refMax 와 동일 단조 룰). 단계 분모 = dailyMaxTokens.
+  const dailyMaxChanged = bumpDailyMax(usageSchema);
+  const tree = computeTree(usage, mem.dailyMaxTokens, date); // 사용량 0 → stage:empty
+  // 활성화하는 날의 그날 합으로 refMax·dailyMaxTokens 단조 갱신(과거 날짜 활성화 포함).
   if (bumpRefMax(usageToRefMetrics(usageSchema))) await persistRefMax();
+  if (dailyMaxChanged) await persistDailyMax();
 
   const today = todayLocalYMD();
   const day = {
@@ -683,6 +747,7 @@ export function _debugSnapshot() {
     yearCount: mem.years.size,
     caps: mem.caps,
     refMax: { ...mem.refMax },
+    dailyMaxTokens: mem.dailyMaxTokens,
   };
 }
 
