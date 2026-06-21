@@ -143,6 +143,35 @@ export class ForestUI {
   }
 
   /**
+   * 단위4 식생 트윅 슬라이더 패널 초기화(디버그 전용). main 이 debug 모드일 때만 호출한다 —
+   * 안 부르면 패널은 display:none 으로 숨고 어떤 이벤트도 안 붙는다(프로덕션 무영향).
+   *   - 각 슬라이더 초기값 = renderer.getVegTweaks()[key], 현재값 텍스트도 동기.
+   *   - input(드래그) → renderer.setVegTweak(key, val) 로 식생만 재반영(§28: 슬라이더 조작 시에만
+   *     무효화, 일반 폴은 무영향). main 의 rAF 루프가 항상 돌아 다음 프레임에 화면 반영되므로
+   *     별도 render() 호출 불필요.
+   * @param {Object} renderer setVegTweak/getVegTweaks 를 가진 렌더러.
+   */
+  initVegTweaks(renderer) {
+    const panel = document.getElementById("veg-tweaks");
+    if (!panel) return;
+    const cur = renderer.getVegTweaks ? renderer.getVegTweaks() : {};
+    const sliders = panel.querySelectorAll('input[type="range"][data-key]');
+    sliders.forEach((slider) => {
+      const key = slider.dataset.key;
+      const valEl = slider.parentElement.querySelector(".vt-val");
+      const init = Number.isFinite(cur[key]) ? cur[key] : Number(slider.value);
+      slider.value = String(init);
+      if (valEl) valEl.textContent = init.toFixed(2);
+      slider.addEventListener("input", () => {
+        const v = Number(slider.value);
+        if (valEl) valEl.textContent = v.toFixed(2);
+        renderer.setVegTweak(key, v);
+      });
+    });
+    panel.style.display = "block";
+  }
+
+  /**
    * 로컬 오늘 날짜를 "YYYY-MM-DD" 로 반환한다(모달 입력 max·검증용).
    * @returns {string} 오늘 날짜.
    */

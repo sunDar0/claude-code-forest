@@ -8,7 +8,9 @@ import { PAL, PAL_PAST } from "./palette.js";
 
 // 잔디 결 텍스처: **베이스 채움 없이**(땅 전체가 이미 grassA 단색) 옅은 풀잎 가닥만 덧그린다.
 //   화면 전체 타일에 균일 적용 → detail 영역 사각 경계 없음. 밀도는 낮게(저비용).
-export function drawGrassBlades(b, cx, cy, gx, gy) {
+//   atten(0~1)=나무 밑동 그늘 강도 — 그늘 안일수록 풀 가닥을 줄인다(D). atten=0 이면 무성.
+//   lush(=grassLushness, 기본 1)=풀 양: 가닥 **밀도 + 크기(길이·굵기)** 를 함께 조절. >1 더 많고 더 크게.
+export function drawGrassBlades(b, cx, cy, gx, gy, atten = 0, lush = 1) {
   const x = (cx - TILE / 2) | 0;
   const y = (cy - TILE / 2) | 0;
   // 타일별 고정 PRNG(프레임마다 안 흔들리게).
@@ -17,8 +19,11 @@ export function drawGrassBlades(b, cx, cy, gx, gy) {
     seed = (seed * 1664525 + 1013904223) >>> 0;
     return seed / 4294967296;
   };
-  // 결 밀도 낮춤(9~15 → 5~8): 전체 균일하게 옅게. 톤 분리 없음.
-  const blades = 5 + ((rnd() * 4) | 0);
+  // 결 밀도(5~8) × lush — 풀 양↑ 이면 가닥 수↑. atten 으로 그늘 안 가닥 감쇠.
+  const base = 5 + ((rnd() * 4) | 0);
+  const blades = Math.max(0, Math.round(base * (1 - atten) * Math.max(0, lush)));
+  // 풀 양↑ 이면 가닥 크기(길이·굵기)도 키운다(lush 0.5~2 → sizeScale ≈ 0.6~1.5, 1 에서 1.0).
+  const sizeScale = Math.max(0.4, Math.min(2, 0.5 + 0.5 * Math.max(0, lush)));
   for (let i = 0; i < blades; i++) {
     const bx = (x + 1 + rnd() * (TILE - 2)) | 0;
     const by = (y + 2 + rnd() * (TILE - 4)) | 0;
@@ -27,9 +32,10 @@ export function drawGrassBlades(b, cx, cy, gx, gy) {
       b.fillStyle = PAL.grassSpeck; // 밝은 점(반짝)
       b.fillRect(bx, by, 1, 1);
     } else {
-      b.fillStyle = r < 0.6 ? PAL.grassBlade2 : PAL.grassBlade1; // 풀잎 1~2px
-      const h = rnd() < 0.5 ? 1 : 2;
-      b.fillRect(bx, by, 1, h);
+      b.fillStyle = r < 0.6 ? PAL.grassBlade2 : PAL.grassBlade1; // 풀잎
+      const h = Math.max(1, Math.round((rnd() < 0.5 ? 1 : 2) * sizeScale)); // 길이 ×sizeScale
+      const w = lush > 1.3 && rnd() < 0.5 ? 2 : 1; // 굵기: 풀 양 충분하면 일부 2px
+      b.fillRect(bx, by, w, h);
     }
   }
 }

@@ -151,8 +151,12 @@ async function boot() {
   // 디버그 모드면 그리드 좌표 라벨을 기본 ON(별도 토글 없음).
   renderer.debug = debugEnabled;
 
-  // 개발 모드 UI: 콘솔 디버그 훅 + 데이터 소스 선택 패널.
-  if (debugEnabled) initDebugUI(renderer, state, mode);
+  // 개발 모드 UI: 콘솔 디버그 훅 + 데이터 소스 선택 패널 + 단위4 식생 트윅 슬라이더.
+  //   식생 트윅은 debug 일 때만 패널 표시·이벤트 배선(프로덕션은 #veg-tweaks display:none 유지).
+  if (debugEnabled) {
+    initDebugUI(renderer, state, mode);
+    ui.initVegTweaks(renderer);
+  }
 
   // 직전 스냅샷의 배치·startDate (활성화 후보 계산용). state.onUpdate 에서 갱신.
   let lastMeta = { placementMap: {}, startDate: null, days: {} };

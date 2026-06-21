@@ -952,6 +952,59 @@
     #locate-btn:hover {
       background: rgba(40, 58, 72, 0.98);
     }
+
+    /* 단위4 식생 트윅 패널(디버그 전용): 좌하단 빈 곳(미니맵·HUD 와 안 겹침). 기본 숨김,
+         debug 모드(서버 FOREST_DEBUG / renderer.debug)일 때만 main 이 display:block. 세션 휘발 값. */
+    #veg-tweaks {
+      position: fixed;
+      left: 8px;
+      bottom: 8px;
+      display: none;
+      /* 기본 숨김 — main 이 debug 일 때만 표시·배선 */
+      background: rgba(18, 24, 18, 0.9);
+      border: 1px solid rgba(90, 130, 90, 0.7);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: 11px "Courier New", monospace;
+      color: #cfe;
+      z-index: 9998;
+      pointer-events: auto;
+      box-shadow: 0 3px 14px rgba(0, 0, 0, 0.5);
+      width: 196px;
+    }
+
+    #veg-tweaks .vt-title {
+      color: #8de08d;
+      font-weight: bold;
+      margin-bottom: 6px;
+      letter-spacing: 0.04em;
+    }
+
+    #veg-tweaks .vt-row {
+      display: grid;
+      grid-template-columns: 64px 1fr 36px;
+      align-items: center;
+      gap: 6px;
+      margin: 3px 0;
+    }
+
+    #veg-tweaks .vt-row .vt-label {
+      color: #b8c8a8;
+      white-space: nowrap;
+    }
+
+    #veg-tweaks .vt-row input[type="range"] {
+      width: 100%;
+      margin: 0;
+      accent-color: #6fae4a;
+      cursor: pointer;
+    }
+
+    #veg-tweaks .vt-row .vt-val {
+      color: #dfeacf;
+      text-align: right;
+      font-weight: bold;
+    }
   </style>
 </head>
 
@@ -1121,6 +1174,42 @@
 
   <!-- §58 미니맵(줌인 시 전체 위치 파악). main rAF 가 renderer.drawMinimap 으로 그림. -->
   <canvas id="minimap" width="150" height="100"></canvas>
+
+  <!-- 단위4 식생 트윅 슬라이더(디버그 전용). 기본 display:none — main 이 debug 일 때만 표시·배선.
+         data-key = VEG_TWEAKS 키. main 이 초기값=renderer.getVegTweaks()·input→renderer.setVegTweak. -->
+  <div id="veg-tweaks">
+    <div class="vt-title">🌿 식생 트윅 (debug)</div>
+    <div class="vt-row">
+      <span class="vt-label">그늘 반경</span>
+      <input type="range" data-key="shadowRadiusFactor" min="0" max="1.5" step="0.05" />
+      <span class="vt-val">—</span>
+    </div>
+    <div class="vt-row">
+      <span class="vt-label">풀 양</span>
+      <input type="range" data-key="grassLushness" min="0" max="2" step="0.05" />
+      <span class="vt-val">—</span>
+    </div>
+    <div class="vt-row">
+      <span class="vt-label">흙 양</span>
+      <input type="range" data-key="soilAmount" min="0" max="1" step="0.05" />
+      <span class="vt-val">—</span>
+    </div>
+    <div class="vt-row">
+      <span class="vt-label">그늘 감쇠</span>
+      <input type="range" data-key="shadowGrassAtten" min="0" max="1" step="0.05" />
+      <span class="vt-val">—</span>
+    </div>
+    <div class="vt-row">
+      <span class="vt-label">숲 밀도</span>
+      <input type="range" data-key="forestDensityCoef" min="0" max="2" step="0.05" />
+      <span class="vt-val">—</span>
+    </div>
+    <div class="vt-row">
+      <span class="vt-label">경계 노이즈</span>
+      <input type="range" data-key="boundaryNoise" min="0" max="2" step="0.05" />
+      <span class="vt-val">—</span>
+    </div>
+  </div>
 
   <script type="module" src="./js/main.js"></script>
 </body>

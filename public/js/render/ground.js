@@ -42,8 +42,11 @@ export function cellCacheWriteN(ctx, tx, ty) {
 // 타일(tx,ty)이 묶인 숲(bundled) 칸에 속하는가. 묶인 칸 베이스는 흙이 아니라 PAST 풀톤이라
 //   _drawForestFloor 외곽 인셋에서 흙색 링이 안 비친다(_drawForestFloor 가 그 위 녹색을 덮는다).
 export function isBundledTile(ctx, tx, ty) {
-  const cell = ctx.cellByKey.get(Math.round(tx / 3) + "," + Math.round(ty / 3));
-  return !!(cell && cell.bundled);
+  const key = Math.round(tx / 3) + "," + Math.round(ty / 3);
+  const cell = ctx.cellByKey.get(key);
+  if (cell && cell.bundled) return true;
+  // C(단위3): 묶인 숲 닫힌 발자국(빈 셀·브리지 셀 포함)도 묶인 칸으로 — 셀 사이 흙 구멍 제거.
+  return !!(ctx.bundledFootprint && ctx.bundledFootprint.has(key));
 }
 
 // 그리드 칸(gx,gy)이 "활성"인가? = 배치된(placement 있는) 데이터 셀이고 묶이지 않음.
@@ -71,6 +74,8 @@ export function groundKindCell(ctx, gx, gy) {
   }
   const cell = ctx.cellByKey.get(key);
   if (cell && cell.bundled) return "forest"; // 묶인 숲 = PAST 풀톤(경계 노이즈 편입)
+  // C(단위3): 닫힌 발자국(빈 셀·브리지 셀)도 forest 로 — 묶인 숲 영역 전체가 하나의 연속 바닥.
+  if (ctx.bundledFootprint && ctx.bundledFootprint.has(key)) return "forest";
   return "dirt"; // 평범한 비활성 흙
 }
 
@@ -95,7 +100,10 @@ export function warpedGroundKind(ctx, u, v, amp) {
   const f = 0.34; // 노이즈 주파수(타일당). 낮을수록 큰 굽이.
   const nx = (fbm(u * f, v * f, 0) - 0.5) * 2 * amp;
   const ny = (fbm(u * f, v * f, 97.3) - 0.5) * 2 * amp;
-  const gx = Math.round((u + nx) / 3), gy = Math.round((v + ny) / 3);
+  // 위상 정합: 셀 매핑 기준점은 정수 타일 인덱스 floor(u)(=tx) — 솔리드 경로 round(tx/3) 와 동일 위상.
+  //   u 의 타일 내부 소수부를 그대로 /3 하면 셀의 우/하단 타일 절반이 다음 셀로 새어(우상단 반 타일
+  //   밀림) 외곽선과 어긋난다. 워프 변위 nx(타일 단위)는 타일 인덱스에 더한다(굽이 효과 보존).
+  const gx = Math.round((Math.floor(u) + nx) / 3), gy = Math.round((Math.floor(v) + ny) / 3);
   return groundKindCell(ctx, gx, gy);
 }
 
@@ -110,7 +118,10 @@ export function ditheredGroundKind(ctx, u, v, amp, dith) {
   // 블록별 디더 지터(월드 좌표 해시·2축 탈상관). 경계 근처에서만 분류를 뒤집어 도트 섞임.
   const jx = (vhash((u * 8) | 0, (v * 8) | 0) - 0.5) * dith;
   const jy = (vhash((v * 8) | 0, ((u * 8) | 0) ^ 0x5bd1e995) - 0.5) * dith;
-  const gx = Math.round((u + nx + jx) / 3), gy = Math.round((v + ny + jy) / 3);
+  // 위상 정합: warpedGroundKind 와 동일 — 셀 매핑 기준점은 정수 타일 인덱스 floor(u)(=tx). 워프·지터
+  //   변위(타일 단위)는 타일 인덱스에 더한다. 노이즈 0(amp=dith=0)이면 round(floor(u)/3) = 솔리드 경로
+  //   round(tx/3) 와 비트 동일 → 경계 = 외곽선. 노이즈/지터>0 의 굽이·디더 섞임은 그대로 작동.
+  const gx = Math.round((Math.floor(u) + nx + jx) / 3), gy = Math.round((Math.floor(v) + ny + jy) / 3);
   return groundKindCell(ctx, gx, gy);
 }
 
