@@ -48,6 +48,10 @@ import { Camera } from "./render/camera.js";
 // 그리드 1칸 = 3×3 타일(= GRID). 줌인 끝 = 이게 화면을 꽉 채우는 배율.
 const CELL_SPAN = GRID; // 한 그리드 월드 px = 3*TILE = 96
 
+// 정적 바닥 캐시를 화면보다 이만큼(각 변) 크게 구워, 작은 팬은 blit 오프셋만으로 처리(재베이크 0).
+//   GRID(=96px) = 그리드 1칸. 한 칸 미만 팬은 마진 안에서 흡수된다.
+const GROUND_BAKE_MARGIN = GRID;
+
 // 식생(풀·그늘·흙) 렌더 계수를 한 객체로 모은다 — 단위 4 트윅 패널이 이걸 드래그로 수정한다.
 //   렌더 코드는 하드코딩 대신 이 값을 읽는다. 단위 2 가 실제 소비하는 키는 D(shadowRadiusFactor·
 //   shadowGrassAtten·grassLushness)뿐. forestDensityCoef·boundaryNoise 는 정의만 — 단위 3·4가 연결.
@@ -119,6 +123,11 @@ export class ForestRenderer {
     this._instBakeBudget = 10;
     this._bakesThisFrame = 0;
 
+    // 정적 바닥 캐시(교정 A): 베이스 흙·풀결·전이대·빈땅 흙을 오프스크린에 1회 베이크 → 매 프레임 blit.
+    //   _drawStaticGround 는 frame 무의존·월드 시드 결정적이라 같은 (내용·줌·백버퍼·트윅·베이크 원점)
+    //   이면 출력 불변. 화면보다 마진(GROUND_BAKE_MARGIN)만큼 크게 구워, 카메라 팬이 마진 안이면
+    //   blit 오프셋만 바꿔 재베이크 0. 마진 밖으로 나가거나 내용/줌/백버퍼/트윅이 바뀌면 재베이크.
+    this._groundBake = null; // { canvas, ctx, bakeOx, bakeOy, w, h, key } | null
     this.offline = false;
     this.generatedAt = null;
     this.empty = true;
@@ -1508,6 +1517,23 @@ export class ForestRenderer {
     const ox = Math.round(this.worldOriginX - this.camera.cam.x);
     const oy = Math.round(this.worldOriginY - this.camera.cam.y);
 
+    // ── 정적 바닥 레이어(베이스 흙·풀결·전이대·빈땅 흙·그리드 외곽선) ──
+    //   프레임 무의존(this.frame 안 씀)·월드 시드 결정적 → 오프스크린 1회 베이크 후 blit.
+    //   흔들림 레이어(잡초·나비·숲풀결·파티클·잎 오버레이)는 아래 Y-sort 패스에서 매 프레임 그대로.
+    //   베이크/스냅샷 패스(_forceDetail·_snapComposite)에선 캐시 우회(직접 그려 풀해상 베이크).
+    if (this._forceDetail || this._snapComposite) {
+      this._drawStaticGround(b, W, H, hY, ox, oy);
+    } else {
+      this._blitStaticGround(b, W, H, hY, ox, oy);
+    }
+
+    // ── 흔들림·객체 레이어(매 프레임) ──
+    this._drawDynamicObjects(b, W, H, hY, ox, oy);
+  }
+
+  // 정적 바닥 레이어를 주어진 원점(ox,oy)·크기(W,H)로 직접 그린다. 프레임 무의존·월드 시드 결정적이라
+  //   캐시 blit 출력과 비트 동일. 베이크(오프스크린)·라이브(캐시 미스 폴백) 양쪽에서 호출된다.
+  _drawStaticGround(b, W, H, hY, ox, oy) {
     // 타일 픽셀 원점: 그리드 중심(gx*GRID)은 타일 경계(3gx*TILE)에 놓이는데, 타일 블록
     //   {3gx-1,3gx,3gx+1}(=round(tx/3) 그룹핑)의 중심은 (3gx+0.5)*TILE 로 반 타일 쏠린다.
     //   타일 렌더만 -TILE/2 당겨 블록 중심을 그리드 중심(=외곽선·나무·라벨 기준)에 맞춘다.
@@ -1651,8 +1677,31 @@ export class ForestRenderer {
         drawEmptyDirtPatch(b, sc.x, sc.y, cell.gx, cell.gy);
       }
     }
+  }
+
+  // 흔들림·객체 레이어(매 프레임). 그리드 외곽선(금색 펄스·빛기둥·후보/호버 — frame 의존)·식생 장식
+  //   (나비·잡초 frame 의존)·바위·물웅덩이·나무·숲 군집(swayBase)·깃발(펄스)을 Y-sort 후 그린다.
+  //   정적 바닥 캐시 위에 매 프레임 덧그린다 — 흔들림을 캐시에 넣으면 멈춰 외형 회귀라 분리한다.
+  _drawDynamicObjects(b, W, H, hY, ox, oy) {
+    const tox = ox - TILE / 2;
+    const toy = oy - TILE / 2;
+    // 타일 루프 범위·LOD·전이대 파라미터를 정적 패스와 동일 식으로 재계산(공유 상태 없이 자족).
+    const groundTop = Math.max(0, hY);
+    const TX_LO = MAP_GX0 * 3 - 1, TX_HI = MAP_GX1 * 3 + 1;
+    const TY_LO = MAP_GY0 * 3 - 1, TY_HI = MAP_GY1 * 3 + 1;
+    const txMin = Math.max(TX_LO, Math.floor((0 - ox) / TILE) - 1);
+    const txMax = Math.min(TX_HI, Math.ceil((W - ox) / TILE) + 1);
+    const tyMin = Math.max(TY_LO, Math.floor((groundTop - oy) / TILE));
+    const tyMax = Math.min(TY_HI, Math.ceil((H - oy) / TILE) + 1);
+    const lod = this._snapComposite || (!this._forceDetail && W * H > 1_500_000);
+
+    // 그늘 밑동 좌표를 이번 프레임용으로 갱신한다. 정적 바닥 캐시가 히트되면 _drawStaticGround 가 안
+    //   불려 _shadeStumps 가 갱신되지 않으므로, 묶인 숲 바닥(swayBase 패스, line ~1920)이 옛 그늘을
+    //   쓰지 않게 여기서 항상 다시 모은다(화면 W,H 기준·결정적·팬 불변·fillRect 0이라 저렴).
+    if (!lod) this._shadeStumps = this._collectShadeStumps(ox, oy, W, H);
 
     // 1.5) 그리드(3×3=하루) 외곽 경계 + 오늘 그리드 점등. 타일 위, 나무 아래.
+    //   금색 펄스·빛기둥·후보/호버 강조 모두 frame 의존 → 캐시 불가(매 프레임).
     this._drawGridBorders(b, ox, oy);
 
     // 2) 빈 타일 장식(꽃·나비 등) — **활성(풀밭) 칸에만**. 비활성(흙) 칸은 잡초만(꽃 없음).
@@ -1767,6 +1816,66 @@ export class ForestRenderer {
       else if (o.kind === "flag") this._drawLastActiveFlag(b, o.ox, o.oy); // Y-sort 편입 깃발
       else drawDecor(b, o.tx, o.ty, o.sx, o.sy, o.density, o.veg, this.frame); // 식생 개수 + 종류 비중
     }
+  }
+
+  // 정적 바닥 캐시 키 — 같으면 재베이크 0(같은 캔버스 blit). 내용·줌·백버퍼·지평선·차단·정적 출력에
+  //   영향 주는 VEG_TWEAKS 만 포함한다. 카메라 위치(ox,oy)는 키에서 제외 — 팬은 마진 안이면 blit
+  //   오프셋으로 흡수하기 때문(키에 넣으면 1px 팬마다 미스 → §28 프리즈 재발). frame 도 제외(정적).
+  // hY 는 키에서 제외: 지평선의 베이크 원점 대비 위치(hY-oy = worldHorizonY-worldOriginY)는 상수라
+  //   세로 팬으로 hY 가 바뀌어도 blit 오프셋(oy 변화)이 그대로 보정한다. 키에 넣으면 세로 1px 팬마다
+  //   미스 → §28 프리즈 재발.
+  _groundBakeKey(W, H) {
+    let blk = "";
+    if (this.blocked && this.blocked.size) {
+      const keys = [...this.blocked.keys()].sort();
+      for (const k of keys) {
+        const tag = this.blocked instanceof Map ? this.blocked.get(k) : "1";
+        blk += k + "=" + tag + ";";
+      }
+    }
+    const t = VEG_TWEAKS;
+    // 정적 출력에 영향 주는 트윅만(grassLushness·boundaryNoise·그늘 3종). forestDensityCoef 는 군집
+    //   스프라이트(별도 캐시)라 정적 바닥과 무관 → 제외.
+    const tw = `${t.grassLushness},${t.boundaryNoise},${t.shadowRadiusFactor},${t.shadowGrassAtten},${t.soilAmount}`;
+    return `${this._contentSig || ""}|z${this.camera.cam.zoom | 0}|${W}x${H}|${tw}|b:${blk}`;
+  }
+
+  // 정적 바닥을 캐시에서 blit. 키가 같고 카메라 팬이 베이크 마진 안이면 재베이크 0(drawImage 1).
+  //   키가 바뀌거나(내용·줌·백버퍼·트윅·차단·지평선) 카메라가 마진 밖으로 나가면 1회 재베이크.
+  //   출력은 _drawStaticGround 직접 그리기와 비트 동일(월드 시드 결정·팬 불변) — 외형 회귀 0.
+  _blitStaticGround(b, W, H, hY, ox, oy) {
+    const key = this._groundBakeKey(W, H);
+    let bake = this._groundBake;
+    // 현재 화면이 베이크 영역 안에 완전히 들어오는지(blit 오프셋이 음수~마진 범위). 마진을 넘으면 재베이크.
+    const inRange =
+      bake && bake.key === key &&
+      bake.w === W + 2 * GROUND_BAKE_MARGIN && bake.h === H + 2 * GROUND_BAKE_MARGIN &&
+      (ox - bake.bakeOx) <= 0 && (ox - bake.bakeOx) >= -2 * GROUND_BAKE_MARGIN &&
+      (oy - bake.bakeOy) <= 0 && (oy - bake.bakeOy) >= -2 * GROUND_BAKE_MARGIN;
+
+    if (!inRange) {
+      // 재베이크: 베이크 원점 = 현재 화면 원점 + 마진(화면이 베이크 영역 중앙에 오게). 정수.
+      const bw = W + 2 * GROUND_BAKE_MARGIN, bh = H + 2 * GROUND_BAKE_MARGIN;
+      if (!bake || bake.w !== bw || bake.h !== bh) {
+        const c = document.createElement("canvas");
+        c.width = bw; c.height = bh;
+        const cx = c.getContext("2d");
+        cx.imageSmoothingEnabled = false;
+        bake = this._groundBake = { canvas: c, ctx: cx, bakeOx: 0, bakeOy: 0, w: bw, h: bh, key: null };
+      }
+      bake.bakeOx = (ox + GROUND_BAKE_MARGIN) | 0;
+      bake.bakeOy = (oy + GROUND_BAKE_MARGIN) | 0;
+      bake.key = key;
+      bake.ctx.clearRect(0, 0, bw, bh);
+      // 지평선도 베이크 좌표계로 평행이동(toy 기준 동일). hY 는 화면 y → 베이크 y = hY + (bakeOy - oy).
+      const bakeHY = hY + (bake.bakeOy - oy);
+      this._drawStaticGround(bake.ctx, bw, bh, bakeHY, bake.bakeOx, bake.bakeOy);
+    }
+    // blit: 베이크 캔버스에서 현재 화면이 차지하는 사각을 잘라 (0,0)에 그린다. dx = bakeOx - ox(≥0).
+    const dx = (bake.bakeOx - ox) | 0;
+    const dy = (bake.bakeOy - oy) | 0;
+    b.imageSmoothingEnabled = false;
+    b.drawImage(bake.canvas, dx, dy, W, H, 0, 0, W, H);
   }
 
   // 마우스 오버 강조: 호버된 그리드 칸(hoverCell, EMPTY 포함·비묶음)·묶인 숲(hoverForestYm) footprint
