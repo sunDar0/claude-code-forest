@@ -113,8 +113,19 @@ test("렌더 스모크: 같은 시드 → 지문 동일(결정성)", async () =>
 //   shadowGrassAtten 0.85→0.6·forestDensityCoef 1.0→1.05·boundaryNoise 1.0→1.5(shadowRadiusFactor 0.6 불변).
 //   풀 가닥 밀도·크기↑·흙 도트↑·경계 노이즈 폭↑ 로 fillRect 증가(ops 1506237→1562661). 식생 계수 기본값만
 //   변경 — 나무·좌표·베이크·데이터 로직 불변.
-const GOLDEN = "fc3a063f";
-const GOLDEN_LEN = 1562661;
+// 교정 A(정적 바닥 캐시) 갱신: _drawGroundAndObjects 의 정적 부분(베이스 흙·풀결 drawGrassBlades·
+//   전이대·빈땅 흙)을 오프스크린 캔버스에 1회 베이크 후 매 프레임 drawImage blit 로 바꿨다(매 프레임
+//   ~70k fillRect 재생성 제거). 지문은 **그리기 호출 로그** 해시라(픽셀 아님), 정적 ops 가 메인 백버퍼
+//   대신 오프스크린 캔버스에 1회만 찍히고 이후 11프레임은 blit 1회로 대체돼 자연히 줄었다(len
+//   1562661→220613). 외형(픽셀) 회귀가 아님은 헤드리스로 별도 증명: _drawStaticGround 를 화면 원점
+//   직접 그리기 vs 베이크(원점+마진) 후 마진만큼 역평행이동했을 때, 가시 영역 내부(가장자리 인셋)
+//   colored fillRect 시퀀스가 순서까지 비트 동일(지평선 화면 밖/화면 안 양쪽 케이스). blit 가 가시
+//   창만 복사하므로 화면 픽셀은 직접 그리기와 동일. 카메라 위치는 키 제외(팬 마진 흡수)·트윅은 키 포함
+//   (드래그 시에만 재베이크)·frame 무관(정적). 나무·숲·식생 장식·깃발·파티클·흔들림 풀결은 캐시 밖
+//   매 프레임 그대로(frame 의존이라 캐시 시 멈춤=회귀). 데이터·좌표·베이크(스프라이트/스냅샷)·나무
+//   아트 로직 불변.
+const GOLDEN = "e90c05af";
+const GOLDEN_LEN = 220613;
 
 test("렌더 스모크: 골든 지문 일치(회귀 가드)", async () => {
   const { fp, len } = await renderFingerprint();
