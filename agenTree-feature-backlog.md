@@ -4,13 +4,14 @@
 
 **이 문서의 위치** — 코드 현 상태는 `agenTree-spec.md`(역설계 spec), 기획 의도·히스토리는 `_workspace/00_architecture.md`. 이 문서는 **앞으로 만들 후보 모음(백로그)** 이다. 착수하면 해당 항목에 상태를 적고, 완료 시 git log·spec 로 흡수한다.
 
-## 진행 상태 (2026-06-23 기준)
+## 진행 상태 (2026-06-24 기준)
 
 | 상태 | 항목 |
 |------|------|
 | 완료 | 이번 달 진행 게이지 + 숲 묶임 토스트 (DOM/HUD, 2026-06-23) |
 | 완료 | 시간대 하늘 (로컬 시계 하루 색 사이클, 렌더, 2026-06-23) |
-| 완료 | 셀 상세 작업 성격 한 줄 + 토큰 약식 표기 (DOM, 2026-06-23) |
+| 완료 | 셀 상세 토큰 약식 표기 (DOM, 2026-06-23, 유지) |
+| 폐기 | 셀 상세 작업 성격 한 줄 (06-23 도입 → 06-24 평균 대비 침엽수 뱃지로 대체) |
 | 완료 | 셀 상세 역대% 폐기 + 평균 대비 침엽수 삼각형 뱃지(1~3) (DOM, 2026-06-24) |
 | 보류(이미 있음) | 오늘 단계 진행 예고 HUD — 호버 툴팁에 경험치 바가 이미 있음 |
 | 대기 | 아래 티어 전부 |
@@ -52,7 +53,7 @@
 
 전부 DOM 텍스트/툴팁 변경이라 골든·§28 무관·즉효. `pickDistribution` 등 기존 분류 재사용으로 effort 작음. 범례는 다른 모든 시각 후보의 가치를 끌어올리는 메타 기능.
 
-- **셀 상세 '작업 성격' 한 줄** [S] — 5메트릭 raw+% 에 **비율 기반** 자연어 캐릭터 한 줄. **절대량 금지**(cacheRead 가 항상 압도적이라 매일 "캐시 많이 읽은 날"이 됨) → `pickDistribution` 의 그날 안 비율(output/input·cacheRead/input 치우침)로 분류. "~경향"·"~위주" 보수 문구. → **완료(2026-06-23)**. `metrics.js` `pickDistribution` export(로직·반환값 불변) + 새 순수함수 `distributionLabel(distribution)`(4분류→보수 문구, 모르는 값 ""). 단일 소스 = `cellInfo` 가 `params.sim.distribution`(이미 pickDistribution 결과, 재계산 0) + `totalTokens`(토큰 4종 합) 노출. ui.js updateDetail 사용량 섹션 직후 `.drow "작업 성격"` 한 줄, `totalTokens>0` 일 때만(EMPTY 는 기존 empty 분기라 자동 미표시). **비율 기반 증명**: cacheRead 1.2억(절대 압도)이라도 input 2천만이면 readRatio 6≤12 → weeping 아닌 uniform(헤드리스). 골든 `e90c05af` 불변(DOM 만). 한계: 실데이터·mock 둘 다 cacheRead/input>12 라 라이브에선 weeping 지배(정직한 분류) → 4종 다양성은 헤드리스 단위테스트로 증명. 상세 `_workspace/20_forest_game_report.md`.
+- **셀 상세 '작업 성격' 한 줄** [S] (2026-06-23 도입 → **2026-06-24 폐기**: 역대% 와 함께 자연어 멘트 제거 → 평균 대비 침엽수 뱃지로 대체. 코드에 `distributionLabel` 호출 0) — 5메트릭 raw+% 에 **비율 기반** 자연어 캐릭터 한 줄. **절대량 금지**(cacheRead 가 항상 압도적이라 매일 "캐시 많이 읽은 날"이 됨) → `pickDistribution` 의 그날 안 비율(output/input·cacheRead/input 치우침)로 분류. "~경향"·"~위주" 보수 문구. → **완료(2026-06-23)**. `metrics.js` `pickDistribution` export(로직·반환값 불변) + 새 순수함수 `distributionLabel(distribution)`(4분류→보수 문구, 모르는 값 ""). 단일 소스 = `cellInfo` 가 `params.sim.distribution`(이미 pickDistribution 결과, 재계산 0) + `totalTokens`(토큰 4종 합) 노출. ui.js updateDetail 사용량 섹션 직후 `.drow "작업 성격"` 한 줄, `totalTokens>0` 일 때만(EMPTY 는 기존 empty 분기라 자동 미표시). **비율 기반 증명**: cacheRead 1.2억(절대 압도)이라도 input 2천만이면 readRatio 6≤12 → weeping 아닌 uniform(헤드리스). 골든 `e90c05af` 불변(DOM 만). 한계: 실데이터·mock 둘 다 cacheRead/input>12 라 라이브에선 weeping 지배(정직한 분류) → 4종 다양성은 헤드리스 단위테스트로 증명. 상세 `_workspace/20_forest_game_report.md`.
 - **숫자 가독성 — 토큰 약식 표기** [S] — 툴팁 raw(478,231,905)를 기존 한글 `abbr()` 로 약식. 상세 모달 raw 유지. → **완료(2026-06-23)**(작업 성격과 묶음). `cellInfo` 가 raw 원시 숫자 노출 → ui.js updateTooltip 이 `abbr` 로 5메트릭 약식(`33.7만`·`2.6억`, 서구식 M/K 아님). 상세 모달 rows 는 `toLocaleString` 정밀 콤마 유지(`336,851`) — 툴팁·상세 분리. 라이브 확인(5188 자체 서버 mock/실): 툴팁 약식·상세 정밀 둘 다 동시 동작·콘솔 0.
 - **호버 미니 추세 스파크라인** [S] — 호버 툴팁에 직전 7일 totalTokens 도트 스파크라인. `cellList` 가 이미 date 오름차순 전체 보유 → 슬라이스만. 분모(refMax vs 7일 로컬최대) 결정 필요.
 - **이 숲이 왜 이렇게 생겼나 — 시각 인과 범례** [M] — 픽셀↔메트릭 매핑(버섯=requestCount·금가루=cacheRead·단계=일일토큰·풀=그늘거리·붉은깃발=마지막활성) 토글 카드. 문구 근거=`agenTree-spec.md §4` 표(죽은 sim 매핑·sap.density 제외). 도트 샘플 오프스크린 1회 베이크.

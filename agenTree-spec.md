@@ -1,6 +1,7 @@
 # Claude Code Forest (agenTree) — 상세 기획문서 (코드 기준)
 
 > **작성 근거:** 현재 코드베이스 역설계(2026-06-17). 영역별 spec 조각(`_workspace/spec_chunks/1~6`)을 데이터 흐름 순으로 합성했다.
+> **2026-06-24 갱신:** 단계 분모 `dailyCapTokens`→`dailyMaxTokens` 교체·시간대 하늘·이번 달 진행 게이지/숲 묶임 토스트·평균 대비 침엽수 뱃지(역대% 폐기)·정적 바닥 오프스크린 베이크·그늘 기반 풀/흙·upload-config userData 경로·최소 창 크기(780×470) 반영.
 > **기존 `_workspace/00_architecture.md` 는 히스토리다.** 본문은 전부 "현재 코드가 실제로 하는 일"을 단정하고, 코드와 갈린 옛 기획·문서는 §8 미확정·후속에 모았다.
 > **근거 표기:** 핵심 계약·비자명 동작에만 `파일:line` 을 단다. 경로는 저장소 루트 기준.
 
@@ -84,12 +85,13 @@
   days,               // { "YYYY-MM-DD": dayObj }
   forests,            // { "YYYY-MM": monthObj }
   yearly,             // { [year]: yearObj } | null
-  dailyCapTokens,     // number  (나무 단계 분모)
+  dailyCapTokens,     // number  (HUD cap 표시·5h 활용도 전용 — 나무 단계 분모 아님)
   fiveHourPct,        // number | null
   sevenDayPct,        // number | null
   capSource,          // "statusline" | "observed" | "mock"
   fiveHourCapTokens,  // number
   refMax,             // { input, output, cacheWrite, cacheRead, requestCount } — 메트릭별 관측 최대치
+  dailyMaxTokens,     // number  (나무 단계 분모 = 일일누적 역대최대, 단조 증가. 클라 표시·참고용)
   generatedAt         // ISO string (비콘텐츠, diff 제외)
 }
 ```
@@ -160,12 +162,14 @@
 - **statusline %**: `~/.claude/statusline/usage-cache.json` 의 `fiveHour`/`sevenDay`(부재·깨짐·숫자 아님 → null).
 - **robust 기준값**(`robustBlockRef`): 90일 블록 totals 의 **p85 분위수**(`REF_PERCENTILE=0.85`, 표본 `<8` 이면 max 폴백). 옛 `observedMax`(max)는 리셋 폭증 한 날이 분모로 영구 박제돼 다른 날이 영영 묘목에 갇히는 '평균의 함정'(극단값 지배)이 있어, 순서통계량인 분위수로 교체(이상치 = 순위만 보므로 무시). 본체 상단(중앙값↑·최대↓)이라 센 날은 성목에 닿고 사용량 편차가 나무 키로 드러난다.
 - **역산**: `fiveHourPct≥1` && 최근 블록 존재 && `latest.totalTokens>0` 이면 `inverse = latest.totalTokens/(pct/100)`, `fiveHourCapTokens = max(inverse, robustBlockRef)`, `capSource='statusline'`. 불가하면 `robustBlockRef>0?robustBlockRef:1`, `capSource='observed'`.
-- **dailyCap**: `dailyCapTokens = round(2 * fiveHourCapTokens)`(하루 ≈ 5시간 윈도우 2개).
+- **dailyCap**: `dailyCapTokens = round(2 * fiveHourCapTokens)`(하루 ≈ 5시간 윈도우 2개). **HUD 표시·5h 활용도 전용 — 나무 단계 분모 아님**(§3.3).
+- **dailyMaxTokens(나무 단계 분모)**: 일일누적 토큰(그날 totalTokens)의 **역대 최대**를 단조 추적해 영속(`store.js`, refMax 와 동일 룰, 시드 하한 `DAILY_MAX_SEED`). 통계 분위수인 dailyCap 과 달리 단순 관측 최대치다. 역대급으로 쓴 날 = `pct≈1.0` = 성목 만개.
 
 ### 3.3 나무 계산 `computeTree` (`aggregate.js:348-374`)
 
 - **species**: `speciesFor(seed)`. store 는 보통 `date` 문자열을 seed 로 준다.
-- **stage 임계**(`STAGE_PCT={young:0.3, mature:0.6}`): `totalTokens<=0`→`empty`. `pct=totalTokens/cap`. cap<=0→`sapling, progress 0`. `pct<0.30`→sapling, `0.30≤pct<0.60`→young, `0.60≤`→mature. 각 구간 progress 는 구간 내 선형. **구간 폭 비율 30:30:40 = 3:3:4** — 묘목 3·유목 3·성목 4 하위 프레임에 균등 10%씩 대응(§6.9 의 10단계 스프라이트 매핑과 정합).
+- **분모 = dailyMaxTokens**: `computeTree(usage, denomTokens, seed)` 의 `denomTokens` 에 store 가 `mem.dailyMaxTokens`(일일누적 역대최대)를 넘긴다(`store.js:361,624`). 옛 `dailyCapTokens` 분모에서 교체 — 분자(그날 totalTokens)·분모(역대최대)가 같은 일일누적 척도라 순환 결함 없음(HUD cap 과 분리).
+- **stage 임계**(`STAGE_PCT={young:0.3, mature:0.6}`): `totalTokens<=0`→`empty`. `pct=totalTokens/denomTokens`. 분모<=0→`sapling, progress 0`. `pct<0.30`→sapling, `0.30≤pct<0.60`→young, `0.60≤`→mature. 각 구간 progress 는 구간 내 선형. **구간 폭 비율 30:30:40 = 3:3:4** — 묘목 3·유목 3·성목 4 하위 프레임에 균등 10%씩 대응(§6.9 의 10단계 스프라이트 매핑과 정합).
 - **xp = totalTokens**.
 
 > **10단계 스프라이트는 렌더 파생.** `tree.stage` 데이터 계약은 매크로 3종(sapling/young/mature) 문자열 + `stageProgress` 그대로다(영속·동결 무변경). 사용자에게 보이는 10단계(묘목1~3·유목1~3·성목1~4)는 렌더가 `stage`+`stageProgress` 로 하위 프레임을 뽑아 만든다(§6.9). 즉 서버는 매크로 단계만 정하고, 하위 분할은 화면에서만 일어난다.
@@ -176,6 +180,7 @@
 
 - **finalized 동결**: 부팅 시 `date<today && active && !finalized` 인 날을 그 시점 stage·xp 그대로 동결(재계산 안 함). 과거 활성화도 즉시 `finalized = date<today`. `refreshToday` 는 오늘이 `!active||finalized` 면 usage·tree 갱신 skip(caps 만).
 - **refMax 단조 추적**: 5키, `REFMAX_SEED` 가 단조 하한. 그날 합이 크면 bump, 변동 시 `forest.json` 영속.
+- **dailyMaxTokens 단조 추적**: 일일누적 totalTokens 의 역대 최대(`DAILY_MAX_SEED` 하한). refMax 와 같은 단조 룰로 bump·`forest.json` 영속(`store.js:176-197,232-239`). 나무 단계 분모(§3.3).
 
 ### 3.5 활성화 거부 규칙 (`activateGrid`, `store.js:497-583`)
 
@@ -246,6 +251,7 @@
 - **species 결정**: `tree.species` 유한이면 그 값(0~4 동결), 아니면 null → 렌더러 `speciesFor(seed)` 폴백. seed = `tree.seed || day.date`.
 - **`pickDistribution`**(`metrics.js:167-178`): `readRatio>12`→weeping, `outRatio>0.6`→spreading, `outRatio<0.25`→upward, else uniform.
 - **species 산식의 fmix32**: FNV-1a 는 같은 달 날짜를 한 수종으로 쏠리게 해서, 수종 매핑에서만 한 번 더 MurmurHash3 finalizer 로 섞는다(`seed.js:47-57`).
+- **평균 대비 표식**(`metricAverages`/`compareToAvg`, `metrics.js:188~`, 순수 함수): 활성일(EMPTY·totalTokens 0 제외) 5메트릭의 산술평균과, 그날 값이 평균보다 위/아래/같음(`up`/`down`/`eq`). 상세 모달 침엽수 뱃지(§7.1)의 모수다. setData 가 1회 계산해 `cellInfo.avgBadges` 로 노출(§6.10). **절대량이 아니라 평균 대비**라 cacheRead 가 늘 압도해도 날·메트릭마다 방향이 갈린다.
 
 ### 4.4 배치 변환 (`grid.js`)
 
@@ -324,12 +330,14 @@ cam.x/y = 보이는 영역 좌상단 월드 px, zoom = 정수 업스케일 배�
 
 - 바닥 종류 `groundKindCell`: 활성=grass, blocked Map 에 있으면 closed, bundled 셀이면 forest, 나머지 dirt. **활성불가 "rock" 종류는 폐기**(§8 drift 3).
 - 경계 타일만 전이대: `warpedGroundKind`(도메인 워프 fbm) + `ditheredGroundKind`(블록별 지터 → 경계 50:50 도트 디더). 월드 좌표라 팬 불변. 비경계는 종류별 3톤 solid.
-- 결 텍스처(LOD 시 생략): 경계=`drawTransitionDetail`, 활성=풀잎, 닫힘=`drawClosedGround`, 흙=`drawPendingGround`. 빈 대지=`drawEmptyDirtPatch`.
+- 결 텍스처(LOD 시 생략): 경계=`drawTransitionDetail`, 활성=풀잎, 닫힘=`drawClosedGround`, 흙=`drawPendingGround`. 빈 대지=`drawEmptyDirtPatch`. **활성 풀결은 나무 밑동 그늘 거리로 점진 감쇠하고 그늘 안엔 흙을 소량 복원**(밑동 둘레만 풀이 듬성·흙이 비침, 2026-06-18 식생 재설계, `renderer.js:1667`).
+- **정적 바닥 = 오프스크린 1회 베이크**(`_groundBake`/`_groundBakeKey`, `renderer.js:1552,1859`): 베이스 흙·풀결·전이대·빈땅 흙·그늘 풀/흙·그리드 외곽선은 프레임 무의존(`this.frame` 안 씀)·월드 시드 결정적이라 오프스크린 1장에 굽고 매 프레임 `drawImage` 1콜로 blit(매 프레임 ~7만 fillRect 제거). 흔들림 레이어(잡초·나비·숲 풀결·파티클·잎 오버레이)만 라이브(§6.7).
 
 ### 6.7 라이브 vs 베이크 경계
 
-- **베이크(정지)**: 나무 본체·수관 통합 음영·뿌리·군집·시트 blit·맵 스냅샷.
-- **라이브(매 프레임)**: 잎 오버레이(`_drawLeafOverlay` — 활성 YOUNG·MATURE 만, LEAF_PAL 상수색, 흔들림·햇빛 반짝·낙엽), 금가루 파티클, 숲 나비, 풀결 굽이침, 깃발 펄럭, UI 강조, 구름, 마지막 활성 금색 아웃라인, 호버 외곽선.
+- **베이크(정지)**: 나무 본체·수관 통합 음영·뿌리·군집·시트 blit·맵 스냅샷·**정적 바닥**(흙·풀결·전이대·빈땅·그늘 풀/흙·그리드 외곽선, §6.6).
+- **라이브(매 프레임)**: 시간대 하늘(아래), 잎 오버레이(`_drawLeafOverlay` — 활성 YOUNG·MATURE 만, LEAF_PAL 상수색, 흔들림·햇빛 반짝·낙엽), 금가루 파티클, 숲 나비, 숲 풀결 굽이침, 깃발 펄럭, UI 강조, 구름, 마지막 활성 금색 아웃라인, 호버 외곽선.
+- **시간대 하늘**(`skyColorsAt`/`SKY_KEYFRAMES`, `render/palette.js`): `_drawSky`·`_renderOverview` 가 로컬 시각으로 하늘 위/아래 색을 보간한다(야간 남색→새벽 보라→정오 파랑→황혼 주황, 키프레임 5개·22→0시 wrap). Date 접근은 `_readClockHour`(`renderer.js:1109`) 한 곳에만 격리하고, 테스트·스냅샷은 `setSkyHour` 로 고정 주입(결정성). 하늘은 **라이브(스냅샷·베이크 미포함)**라 시각이 바뀌어도 재베이크 0. 정오 키프레임 = 기존 `PAL.skyTop/skyBot` 동일(골든 보존). 야간도 검정 아닌 남색(금가루·붉은 깃발·나무 대비 유지).
 - **마지막 활성 깃발**(`_drawLastActiveFlag`): 칸 우하단 안쪽 5px 고정·사선 깃대 + 붉은 천 펄럭, Y-sort 큐 편입(칸 bbox = `gridToScreen` 중심 ± GRID/2).
 - **호버 외곽선**(`_drawHoverHighlight`): 커서가 올라간 칸(`hoverCell`, 빈 대지 포함·비묶음) footprint 와 묶인 숲(`hoverForestYm`) bbox 외곽에 옅은 녹색 strokeRect(`rgba(170,225,150,~0.4)`·1px·정수·펄스 없음·금색보다 은은). 정상 위치(이동 없음)·라이브 전용(overview/스냅샷 합성 제외). 호버 대상 = 나무 칸은 `_treeAtCanvas`(커서가 나무 스프라이트 그릴 사각에 들면 그 밑동 셀 — 큰 성목 수관 호버도 잡음), 폴백은 그리드 칸 조회. **(연혁: 호버 시 칸을 들어 올리는 "떠오름" 연출을 만들었다가 사용자 판단으로 폐기 — 지금은 외곽선만.)**
 
@@ -347,7 +355,7 @@ cam.x/y = 보이는 영역 좌상단 월드 px, zoom = 정수 업스케일 배�
 
 ### 6.10 DOM 노출 getter (렌더러 → ui.js)
 
-- `cellInfo(cell)`: 빈땅이면 `{date,empty:true,stage:0,rows:[]}`, 아니면 `{date,empty:false,stage,stageProgress,pct,isActive,species,norms,linPct,rows:[5메트릭]}`.
+- `cellInfo(cell)`: 빈땅이면 `{date,empty:true,stage:0,rows:[]}`, 아니면 `{date,empty:false,stage,stageProgress,pct,isActive,species,norms,linPct,avgBadges,rows:[5메트릭]}`. `avgBadges` = 메트릭별 평균 대비 침엽수 뱃지 `{dir:"up"|"down"|"eq", level:1~3}`(§4.3·§7.1), setData 가 1회 계산. `linPct` 는 계산·노출되나 상세 모달 표시에선 더는 안 쓴다(침엽수 뱃지로 대체, §7.1).
 - `forestInfo(ym)`: `{month,bundled,rows:[["나무","N 그루(활성 N일)"],…5메트릭]}`.
 - `selectedCellPreview(size=128)`: 선택 칸을 오프스크린에 확대 렌더한 dataURL(PNG, 없거나 묶인 셀이면 null). 고정폭 흙 슬래브(풀/흙 윗면 + 세로 음영 흙벽·오버행 립·측면 슬리버·접지 그림자 = 2.5D 두께) 위에 그 칸 베이크 나무를 가로중앙·하단 앵커·정수배 nearest 로 얹는다. 바닥색은 `_isActiveGridCell`(배치 칸=풀·아니면 흙). 식생 없음. 같은 키 캐시(폴마다 재생성 0). 상세 모달 상단 미리보기에 쓴다.
 - `getHud`/`isOffline`/`isEmpty`/`getHover`/`getSelected`/`hasLastActive`·플래그 `debug`(좌표 라벨·격자선, ?debug=1)·`hudCollapsed`.
@@ -360,8 +368,9 @@ cam.x/y = 보이는 영역 좌상단 월드 px, zoom = 정수 업스케일 배�
 
 **한 문단 요약.** `ForestUI` 는 캔버스에 한 픽셀도 안 그리고 `index.html` 의 DOM 요소(HUD·툴팁·상세 모달·확인 팝업·시작일 모달·업로드 설정 모달·자동 심기 토글·미니맵·찾기 버튼)를 갱신·표시한다. 데이터는 renderer getter 와 main 이 넘기는 `meta` 에서 읽고, 자기 상태는 마지막 업로드 상태와 localStorage 자동 심기 플래그뿐이다.
 
-- **HUD**: 우상단(`#hud-tr` — 포트·5h/7d·월 활성수·월 누적 5메트릭) + 하단(`#hud-bottom` — 상단 전용 바 `#upload-row` + 최근 날 5메트릭, 각 `(Height)/(Foliage)/(Structure)/(Energy Flow)/(Vibrancy)` 서브라벨). HUD 접기는 main 이 `#ui.hud-collapsed` 토글.
-- **모달**: 시작일(재진입 가드 — 5초 폴마다 호출돼도 입력 리셋 안 함), 상세(**맨 위 `.detail-preview` 에 `selectedCellPreview(128)` 확대 그리드 이미지** + 빈 대지=날짜+요일만 / 나무=단계 "묘목/유목/성목 N/M"·수종·경험치 바·5메트릭 raw + 선형 비중%), 심기 확인 팝업(커서 근처), 업로드 설정(서버주소·이메일·주기·자동전송, 이메일 형식 검증).
+- **HUD**: 우상단(`#hud-tr` — 포트·5h/7d·월 활성수·월 누적 5메트릭 + **이번 달 숲 진행 막대**(`month-gauge`, 채움 = `activeDays/그달일수`, 기존 집계 재사용·새 집계 0)) + 하단(`#hud-bottom` — 상단 전용 바 `#upload-row` + 최근 날 5메트릭, 각 `(Height)/(Foliage)/(Structure)/(Energy Flow)/(Vibrancy)` 서브라벨). HUD 접기는 main 이 `#ui.hud-collapsed` 토글.
+- **숲 묶임 토스트**(`bundle-toast`, `ui.js:751`): 자동 묶기 false→true 순간 1회 잠깐 떴다 페이드. main `detectAutoBundle` 의 `lastBundled` 가드로 ym 당 1회 보장(첫 폴은 무시).
+- **모달**: 시작일(재진입 가드 — 5초 폴마다 호출돼도 입력 리셋 안 함), 상세(**맨 위 `.detail-preview` 에 `selectedCellPreview(128)` 확대 그리드 이미지** + 빈 대지=날짜+요일만 / 나무=단계 "묘목/유목/성목 N/M"·수종·경험치 바·5메트릭 raw + **메트릭별 평균 대비 침엽수 뱃지**(초록 나무=평균 위·붉은 역삼각형=평균 아래, 1~3단, `ui.js:90 treeBadge`). **역대 최대 대비 %·자연어 멘트는 폐기**(사용자 오해, `ui.js:395`)), 심기 확인 팝업(커서 근처), 업로드 설정(서버주소·이메일·주기·자동전송, 이메일 형식 검증).
 - **자동 심기 토글**: 두 체크박스(`#auto-plant`·`#start-auto-plant`)가 같은 localStorage `forest.autoPlant`(기본 ON) 공유.
 - **심는 중**: `#planting-overlay`(전체 입력 차단, z45) + `#planting-indicator`(끄기 버튼, z46) + 토글(z47, 차단 위라 끌 수 있음). `setPlanting(on, showStop=true)` — **수동 심기는 `showStop=false`** 로 '자동 끄기' 버튼을 숨긴다("심는 중…" 표시는 유지, 자동 심기 OFF 상태에 무의미한 버튼 제거). 자동 루프만 버튼 노출.
 - **미니맵·찾기 버튼**: ui.js 는 안 만짐(main 이 매 프레임 `drawMinimap`·`updateLocateButton`). 미니맵 좌상단 150×100·줌 무관 항상 표시.
@@ -369,7 +378,7 @@ cam.x/y = 보이는 영역 좌상단 월드 px, zoom = 정수 업스케일 배�
 ### 7.2 중앙 서버 업로드 (`server/upload.js`)
 
 - **계약**: `scanUsageData()` 의 `{daily:…}` JSON 을 `POST {serverUrl}/api/claude-usage/upload`, `multipart/form-data`(필드 `file`·`hostname`·`timestamp`·`userEmail`). 성공 = HTTP 200/201. 인증은 userEmail 필드(별도 토큰 없음).
-- **설정 우선순위**: `data/upload-config.json` > env(`UPLOAD_SERVER_URL`/`UPLOAD_USER_EMAIL`/`UPLOAD_INTERVAL`) > 코드 기본(interval 600초, enabled = email 있으면 true).
+- **설정 우선순위**: `<DATA_DIR>/upload-config.json` > env(`UPLOAD_SERVER_URL`/`UPLOAD_USER_EMAIL`/`UPLOAD_INTERVAL`) > 코드 기본(interval 600초, enabled = email 있으면 true). **`DATA_DIR = FOREST_DATA_DIR || <repo>/data`**(`upload.js:20`) — store.js 와 동일하게 env 우선이라 패키징본은 userData 에 저장된다. (이전엔 `__dirname/../data` 하드코딩이라 asar 안에서 쓰기가 조용히 실패 → 설정이 재시작마다 초기화되던 버그를 수정.)
 - **상태/UI**: `uploadStatus()` → `{enabled, configured, serverUrl, userEmail, intervalSec, lastUploadTime, uploadCount, lastError}`. 클라 main 이 30초 폴 + 1분 상대시간 타이머로 하단 바 갱신(`/api/forest` 폴과 독립). `startAutoUpload` 는 enabled&&email 일 때만 listen 직후 즉시1회+타이머.
 
 ### 7.3 Electron 데스크톱 배포 (`main.js`/`preload.js`/`package.json`)
@@ -377,7 +386,7 @@ cam.x/y = 보이는 영역 좌상단 월드 px, zoom = 정수 업스케일 배�
 **한 문단 요약.** 이미 동작하는 웹 대시보드를 새 기능 없이 Electron 으로 감싼다. 메인 프로세스가 기존 http 서버를 인프로세스로 띄우고 BrowserWindow 가 `http://localhost:실제포트` 를 로드한다. 핵심은 패키징 시 asar 읽기전용 함정을 피하려 data 쓰기 경로를 `userData` 로 주입하는 것.
 
 - **준비 시퀀스**(`main.js:41-64`): `app.whenReady` → `process.env.FOREST_DATA_DIR = userData/data` 설정(store import 전) → 동적 `import('./server/index.js')` → `startServer(PORT)`(실패 시 1회 재시도, 그래도 실패하면 stderr 만·throw 없음) → `serverHandle.address().port` 로 실제 포트 추출 → `createWindow(actualPort)`.
-- **창 보안 기본값**: `contextIsolation:true`, `nodeIntegration:false`, 빈 preload(노출 API 없음 — 렌더러는 일반 브라우저처럼 localhost API fetch).
+- **창 설정**: `minWidth:780`·`minHeight:470`(`main.js:27-28` — 16:9 레터박스 비율 439 + HUD 상하 여유 실측 보정. 웹 단독 구동도 `index.html` CSS `min-width/min-height` 로 동일 하한). 보안 기본값 `contextIsolation:true`, `nodeIntegration:false`, 빈 preload(노출 API 없음 — 렌더러는 일반 브라우저처럼 localhost API fetch).
 - **종료**: `window-all-closed` → `serverHandle.close()` → `app.quit()`.
 - **data 경로 분기**: `DATA_DIR = env || <repo>/data`. 개발 무변경, 배포본만 userData. `asar:true` 이나 data 가 userData 로 빠져 unpack 불필요.
 - **electron-builder**: appId `com.claudeforest.app`, mac `dmg/zip`(identity:null 서명 없음), win `nsis`, files = main/preload/server/public/mock/package.json. scripts: `pack`(--dir 검증), `dist`/`dist:mac`/`dist:win`.
