@@ -55,6 +55,7 @@ async function renderFingerprint(seed = 12345, frames = 12) {
     const { ForestRenderer } = await import("../public/js/renderer.js");
     const cellList = DAYS.map((d) => forestCellParams(d, CAP, REF_MAX));
     const r = new ForestRenderer(g.makeCanvas());
+    r.setSkyHour(12); // 시간대 하늘(작업 3): 정오 고정 주입 — render 가 시계를 안 읽어 결정적.
     r.setForests({});
     r.setData(cellList, null, PLACEMENT);
     resetOps();
@@ -195,5 +196,68 @@ test("오버뷰 스냅샷: 전부 empty 인 묶인 달이 있어도 합성 도�
     assert.ok(ops.some((o) => o.includes("pendDirt") || o.includes("8a6238") || o.includes("785530")), "흙 베이스 등장");
   } finally {
     g.restore && g.restore();
+  }
+});
+
+// ===== 작업 4(재설계): cellInfo 계약 — 평균 대비 표식(avgCompare)·툴팁 약식(raw) 노출 =====
+//   상세 모달/툴팁 DOM 로직이 읽는 getter 계약만 검증(렌더 호출 아님 → 골든 무관).
+//   픽스처 활성일 3개(06-10/11/12) 평균: input≈29333, cacheRead=850000 (EMPTY 41칸은 모수 제외).
+test("cellInfo: 나무 칸이 avgCompare·totalTokens·raw 를 노출(평균 대비 표식·툴팁 약식 입력)", async () => {
+  const g = installGlobals(123);
+  try {
+    const { ForestRenderer } = await import("../public/js/renderer.js");
+    const cellList = DAYS.map((d) => forestCellParams(d, CAP, REF_MAX));
+    const r = new ForestRenderer(g.makeCanvas());
+    r.setForests({});
+    r.setData(cellList, null, PLACEMENT);
+
+    // 06-10: 가장 큰 날 → 5메트릭 모두 평균보다 위(▲).
+    const hi = r.cells.find((c) => c.params.date === "2026-06-10");
+    assert.ok(hi, "픽스처 나무 칸 존재");
+    const info = r.cellInfo(hi);
+    assert.equal(info.empty, false);
+    assert.ok(info.totalTokens > 0, "토큰 합 > 0 → 평균 대비 표식 대상");
+    assert.equal(info.avgCompare.input, "up"); // 50000 > 평균 29333
+    assert.equal(info.avgCompare.cacheRead, "up"); // 2000000 > 평균 850000
+    assert.equal(info.avgCompare.requests, "up"); // 120 > 평균 66.7
+    // 침엽수 뱃지: 같은 방향이되 {dir,level} 객체. level 1~3.
+    assert.equal(info.avgBadges.input.dir, "up");
+    assert.ok(info.avgBadges.input.level >= 1 && info.avgBadges.input.level <= 3);
+    // 06-11: 가장 작은 날 → 평균보다 아래(▼). cacheRead 가 절대 큰 메트릭이어도 평균 대비라 ▼ 로 갈린다.
+    const lo = r.cells.find((c) => c.params.date === "2026-06-11");
+    const loInfo = r.cellInfo(lo);
+    assert.equal(loInfo.avgCompare.input, "down"); // 8000 < 평균 29333
+    assert.equal(loInfo.avgCompare.cacheRead, "down"); // 50000 < 평균 850000 (절대 큰 메트릭도 평균 아래면 ▼)
+    assert.equal(loInfo.avgBadges.input.dir, "down"); // 뱃지도 같은 방향
+    // 같은 cacheRead 메트릭이 셀에 따라 ▲·▼ 로 갈린다 — cacheRead 압도와 무관.
+    assert.notEqual(info.avgCompare.cacheRead, loInfo.avgCompare.cacheRead);
+    // raw(원시 숫자) 노출 — 툴팁이 abbr 로 약식할 입력. rows(콤마 정밀)와 별개로 둘 다 존재.
+    assert.equal(info.raw.cacheRead, 2_000_000);
+    assert.equal(info.raw.input, 50000);
+    assert.ok(Array.isArray(info.rows) && info.rows.length === 5, "상세 모달 정밀 rows 무회귀");
+    assert.equal(info.rows[4][1], (2_000_000).toLocaleString("en-US")); // Cache Read 콤마 유지
+  } finally {
+    g.restore();
+  }
+});
+
+test("cellInfo: 빈 대지(EMPTY)는 empty:true·avgCompare 없음(평균 대비 표식 미표시 보장)", async () => {
+  const g = installGlobals(123);
+  try {
+    const { ForestRenderer } = await import("../public/js/renderer.js");
+    const cellList = DAYS.map((d) => forestCellParams(d, CAP, REF_MAX));
+    const r = new ForestRenderer(g.makeCanvas());
+    r.setForests({});
+    r.setData(cellList, null, PLACEMENT);
+
+    const empty = r.cells.find((c) => c.params.stage === 0); // STAGE.EMPTY
+    assert.ok(empty, "빈 대지 칸 존재");
+    const info = r.cellInfo(empty);
+    assert.equal(info.empty, true);
+    assert.equal(info.avgCompare, undefined); // empty 분기는 avgCompare 미노출 → UI 가 표식 안 그림
+    assert.equal(info.avgBadges, undefined); // 침엽수 뱃지도 미노출(EMPTY 무뱃지 보장)
+    assert.deepEqual(info.rows, []);
+  } finally {
+    g.restore();
   }
 });

@@ -79,6 +79,50 @@ function xpBar(progress) {
 }
 
 /**
+ * 평균 대비 침엽수 뱃지(inline SVG). 삼각형 1~3개를 세로로 포갠 전나무 실루엣.
+ *   - 상승(dir="up"): 초록, 위로 향한 삼각형(전나무). level 개 위→아래로 점점 넓게 포갬.
+ *   - 하락(dir="down"): 붉은, 아래로 향한 역삼각형. level 개 포갬.
+ *   - eq/level 0/뱃지 없음: 빈 문자열(표식 없음).
+ * 도트 게임 톤 — 작게(텍스트 높이), 좌표는 정수 픽셀.
+ * @param {{dir:"up"|"down"|"eq", level:number}|null|undefined} badge avgBadges[key]
+ * @returns {string} inline SVG HTML 또는 빈 문자열
+ */
+function treeBadge(badge) {
+  const dir = badge && badge.dir;
+  const level = badge && badge.level | 0;
+  if ((dir !== "up" && dir !== "down") || level < 1) return "";
+  const up = dir === "up";
+  const color = up ? "#7ec850" : "#d05a52"; // 초록 / 붉은
+  const W = 11; // 삼각형 폭(px)
+  const H = 6; // 단 높이(px)
+  const OV = 2; // 단 겹침(포갬)
+  const step = H - OV; // 단 사이 간격
+  const totalH = H + step * (level - 1);
+  // 위쪽 삼각형이 좁고 아래로 갈수록 넓어지는 전나무. 각 단은 같은 폭이되 세로로 겹쳐 쌓는다.
+  const tris = [];
+  for (let i = 0; i < level; i++) {
+    const top = i * step;
+    const bot = top + H;
+    let pts;
+    if (up) {
+      // 위로 향한 삼각형: 꼭짓점 위, 밑변 아래.
+      pts = `${W / 2},${top} 0,${bot} ${W},${bot}`;
+    } else {
+      // 아래로 향한 역삼각형: 밑변 위, 꼭짓점 아래.
+      pts = `0,${top} ${W},${top} ${W / 2},${bot}`;
+    }
+    tris.push(`<polygon points="${pts}"/>`);
+  }
+  const title = up
+    ? `평균보다 위 (${level}단계)`
+    : `평균보다 아래 (${level}단계)`;
+  return (
+    `<svg class="tree-badge" width="${W}" height="${totalH}" viewBox="0 0 ${W} ${totalH}" ` +
+    `fill="${color}" aria-hidden="true"><title>${title}</title>${tris.join("")}</svg>`
+  );
+}
+
+/**
  * DOM 오버레이(HUD·툴팁·모달·활성화 UI)를 소유하고 갱신하는 클래스.
  * 데이터는 renderer getter 와 main 이 넘기는 meta 에서 읽고 HTML 요소만 갱신한다.
  */
@@ -92,6 +136,10 @@ export class ForestUI {
       // 우상단: 5h/7d + 이번달 활성수 + 월 누적 5메트릭
       fiveHour: $("m-fivehour"), sevenDay: $("m-sevenday"),
       mCount: $("m-count"),
+      // 작업2(A): 이번 달 숲 진행 막대(채움% = activeDays/그달일수)
+      mgCount: $("mg-count"), mgFill: $("mg-fill"),
+      // 작업2(B): 숲 묶임 완성 토스트
+      bundleToast: $("bundle-toast"),
       tInput: $("t-input"), tOutput: $("t-output"), tCwrite: $("t-cwrite"),
       tCread: $("t-cread"), tReq: $("t-req"),
       tooltip: $("tooltip"), detail: $("detail"),
@@ -228,6 +276,12 @@ export class ForestUI {
     m = m || { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, requestCount: 0, activeDays: 0 };
     const daysInMonth = month ? new Date(+month.slice(0, 4), +month.slice(5, 7), 0).getDate() : 0;
     set(this.el.mCount, month ? `${m.activeDays || 0}/${daysInMonth}` : "—");
+    // 작업2(A): 진행 막대 = 위 activeDays·daysInMonth 재사용(새 집계·서버 호출 0).
+    // 음수/NaN 방지, 채움% 는 0~100 클램프.
+    const activeDays = Math.max(0, m.activeDays || 0);
+    const pct = daysInMonth > 0 ? Math.min(100, (activeDays / daysInMonth) * 100) : 0;
+    set(this.el.mgCount, month ? `${activeDays}/${daysInMonth}일` : "—");
+    if (this.el.mgFill) this.el.mgFill.style.width = pct + "%";
     set(this.el.tInput, abbr(m.inputTokens));
     set(this.el.tOutput, abbr(m.outputTokens));
     set(this.el.tCwrite, abbr(m.cacheWriteTokens));
@@ -273,10 +327,19 @@ export class ForestUI {
         html = `<div class="title">${info.date || ""}</div>빈 대지(데이터 없음)`;
       } else {
         const stage = stageLabel(info.stage);
+        // 툴팁은 한글 약식(abbr): 4.8억 식. 상세 모달의 rows(정밀 콤마)는 손대지 않는다.
+        const r = info.raw || {};
+        const tipRows = [
+          ["Requests", abbr(r.requests)],
+          ["Input Tokens", abbr(r.input)],
+          ["Output Tokens", abbr(r.output)],
+          ["Cache Creation", abbr(r.cacheWrite)],
+          ["Cache Read", abbr(r.cacheRead)],
+        ];
         html =
           `<div class="title">${info.date} · ${stage}</div>` +
           xpBar(info.stageProgress) +
-          info.rows.map(([k, v]) => `${k}: ${v}`).join("<br>");
+          tipRows.map(([k, v]) => `${k}: ${v}`).join("<br>");
       }
     }
     tip.innerHTML = html;
@@ -328,18 +391,17 @@ export class ForestUI {
         : `<div class="drow"><span class="k">성목</span><span class="v">최고 단계</span></div>`;
       // 부제 = 요일 · 수종.
       const subParts = [wd, species].filter(Boolean);
-      // 5메트릭 실측값(rows) + 선형 비중(linPct = 역대 최대 대비). rows 순서 동일.
-      //   norms(logNorm)는 나무 렌더용 — 상세 % 는 직관적 선형 linPct 를 쓴다.
-      const lp = info.linPct || {};
-      const pctMap = {
-        Requests: lp.requestN, "Input Tokens": lp.inputN, "Output Tokens": lp.outputN,
-        "Cache Creation": lp.cacheWriteN, "Cache Read": lp.cacheReadN,
+      // 5메트릭 실측값(rows) + 침엽수 뱃지(평균 대비 방향·정도). rows 순서 동일.
+      //   raw 절대값만 표시(역대 최대 대비 % 폐기 — 사용자 오해). 뱃지로 평균 대비를 표현.
+      const badges = info.avgBadges || {};
+      const badgeKey = {
+        Requests: "requests", "Input Tokens": "input", "Output Tokens": "output",
+        "Cache Creation": "cacheWrite", "Cache Read": "cacheRead",
       };
       const metricRows = info.rows
         .map(([k, v]) => {
-          const nv = pctMap[k];
-          const nrm = Number.isFinite(nv) ? `<span class="nrm">(${Math.round(nv * 100)}%)</span>` : "";
-          return `<div class="drow"><span class="k">${k}</span><span class="v">${v}${nrm}</span></div>`;
+          const b = badges[badgeKey[k]];
+          return `<div class="drow"><span class="k">${k}</span><span class="v">${v}${treeBadge(b)}</span></div>`;
         })
         .join("");
       body =
@@ -348,9 +410,9 @@ export class ForestUI {
         `<div class="xplabel">경험치 (${stage} 진행)</div>` +
         xpBar(info.stageProgress) +
         nextLine +
-        `<div class="section">사용량 — 실측값 · 역대 최대 대비 %</div>` +
+        `<div class="section">사용량 — 실측값</div>` +
         metricRows +
-        `<div class="pct-note">% 는 관측된 역대 최대 사용량 대비 비율 (최대치는 사용할수록 갱신됨)</div>`;
+        `<div class="pct-note">초록 나무 = 평균 위, 붉은 역삼각형 = 평균 아래. 개수(1~3)는 평균과의 차이 정도.</div>`;
     }
     // 모달 상단: 선택 칸 확대 프리뷰(있으면). 그 아래 기존 상세.
     const previewUrl = renderer.selectedCellPreview ? renderer.selectedCellPreview(128) : null;
@@ -681,5 +743,26 @@ export class ForestUI {
     if (this.el.startInput) this.el.startInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); submit(); }
     });
+  }
+
+  /**
+   * 작업2(B): 숲 묶임 완성 토스트를 1회 표시한다(잠깐 떴다 페이드).
+   * 타이머 기반(setTimeout)으로 렌더 루프와 무관. main 의 detectAutoBundle 가
+   * false→true 분기(lastBundled 가드로 ym 당 1회 보장)에서 호출한다.
+   * @param {string} ym 묶인 달 "YYYY-MM".
+   */
+  showBundleToast(ym) {
+    const el = this.el.bundleToast;
+    if (!el) return;
+    const month = ym && /^\d{4}-\d{2}$/.test(ym) ? +ym.slice(5, 7) : null;
+    el.textContent = month ? `${month}월 숲이 완성됐어요` : "지난 달 숲이 완성됐어요";
+    // 직전 토스트 타이머가 살아있으면 초기화(연속 묶임 시 마지막만 깔끔히 표시).
+    if (this._toastShowT) clearTimeout(this._toastShowT);
+    if (this._toastHideT) clearTimeout(this._toastHideT);
+    // 강제 리플로우 후 show 부착(transition 재발동).
+    el.classList.remove("show");
+    void el.offsetWidth;
+    el.classList.add("show");
+    this._toastHideT = setTimeout(() => { el.classList.remove("show"); }, 3200);
   }
 }

@@ -179,6 +179,38 @@
       font-size: 15px;
     }
 
+    /* 작업2(A): 이번 달 숲 진행 막대. 트랙=어두운 흙톤, 채움=연두(month-count 강조색과 통일). */
+    #hud-tr .month-gauge {
+      margin-bottom: 6px;
+    }
+
+    #hud-tr .month-gauge .mg-label {
+      font-size: 11px;
+      color: #d8c8a8;
+      margin-bottom: 3px;
+    }
+
+    #hud-tr .month-gauge .mg-label span {
+      color: #bfe88f;
+      font-weight: bold;
+    }
+
+    #hud-tr .month-gauge .mg-track {
+      width: 100%;
+      height: 6px;
+      background: rgba(40, 28, 18, 0.7);
+      border: 1px solid rgba(90, 64, 40, 0.6);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    #hud-tr .month-gauge .mg-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #6e9b3a, #bfe88f);
+      transition: width 0.3s ease;
+    }
+
     #hud-tr .month-label {
       font-size: 11px;
       color: #9a8c78;
@@ -542,11 +574,10 @@
       margin: 10px 0 3px;
     }
 
-    /* §56 메트릭 raw 값 옆 비중(정규화) 회색 보조 */
-    #detail .drow .nrm {
-      color: #8a7c66;
-      font-size: 11px;
-      margin-left: 8px;
+    /* 그날 값의 평균 대비 침엽수 뱃지(inline SVG). 텍스트 끝에 작게 정렬. */
+    #detail .drow .tree-badge {
+      margin-left: 6px;
+      vertical-align: -1px;
     }
 
     /* §62 선형 비중 안내 한 줄(옅은 색·작은 글씨). */
@@ -586,6 +617,31 @@
       font-size: 13px;
       display: none;
       z-index: 15;
+    }
+
+    /* 작업2(B): 숲 묶임 완성 토스트. 자동 묶임 false→true 순간 1회, 잠깐 떴다 페이드.
+         타이머 기반(렌더 루프 무관). 화면 상단 중앙. */
+    #bundle-toast {
+      position: fixed;
+      top: 0;
+      left: 50%;
+      transform: translate(-50%, -20px);
+      background: rgba(40, 60, 28, 0.92);
+      color: #e8f6cf;
+      border: 1px solid rgba(120, 160, 80, 0.7);
+      padding: 9px 18px;
+      font-size: 14px;
+      border-radius: 6px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+      opacity: 0;
+      pointer-events: none;
+      z-index: 60;
+      transition: opacity 0.4s ease, transform 0.4s ease;
+    }
+
+    #bundle-toast.show {
+      opacity: 1;
+      transform: translate(-50%, 24px);
     }
 
     /* 심는 중 입력 차단 오버레이(자동 점진 연출·수동 activate 왕복 동안).
@@ -1027,6 +1083,11 @@
           <span class="c-7d" id="m-sevenday">7d: —</span>
         </div>
         <div class="month-count">이번 달 활성 <span id="m-count">—</span></div>
+        <!-- 작업2(A): 이번 달 숲 진행 막대. 채움% = activeDays/그달일수(ui.js updateHud 재사용). -->
+        <div class="month-gauge">
+          <div class="mg-label">이번 달 숲 <span id="mg-count">—</span></div>
+          <div class="mg-track"><div class="mg-fill" id="mg-fill"></div></div>
+        </div>
         <div class="month-label">이번 달 누적</div>
         <div class="metric">
           <div class="label">Input Tokens</div>
@@ -1096,6 +1157,8 @@
     <!-- 상태 -->
     <div id="offline">● 오프라인</div>
     <div id="empty-note">빈 대지 — 사용량 데이터 없음</div>
+    <!-- 작업2(B): 숲 묶임 완성 토스트(타이머 페이드, ui.js showBundleToast 가 표시). -->
+    <div id="bundle-toast"></div>
 
     <!-- §15-2 활성화 안내 -->
     <div id="plant-prompt">🌱 오늘 나무 심을 자리를 고르세요</div>
