@@ -161,10 +161,14 @@ export function forestCellParams(day, dailyCapTokens = 0, refMax = null) {
  * 형태 다양성: 메트릭 비율로 분포 타입 선택.
  *   output/input 비율이 높으면 잎 위주(spreading), 낮으면 위로 뻗음(upward),
  *   cache_read 가 압도적이면 늘어짐(weeping) 으로 변주.
+ *
+ *   ★ 비율(치우침) 기준이지 절대량 기준이 아니다. cacheRead 는 절대량으로 늘 input·output 을
+ *   압도(보통 95%+)하므로 절대량으로 분류하면 매일 "캐시 많은 날"이 되어 의미가 없다.
+ *   그래서 readRatio = cacheRead/input 처럼 그날 안의 비율로만 판정한다.
  * @param {Object} u usage(5메트릭)
  * @returns {string} "weeping"|"spreading"|"upward"|"uniform"
  */
-function pickDistribution(u) {
+export function pickDistribution(u) {
   const input = Math.max(1, (u && u.inputTokens) || 0);
   const output = Math.max(0, (u && u.outputTokens) || 0);
   const cacheRead = Math.max(0, (u && u.cacheReadTokens) || 0);
@@ -175,4 +179,69 @@ function pickDistribution(u) {
   if (outRatio > 0.6) return "spreading"; // 출력 풍부 → 넓게 퍼짐
   if (outRatio < 0.25) return "upward"; // 출력 적음 → 위로 집중
   return "uniform";
+}
+
+// 상세 모달 평균 대비 표식이 쓰는 5메트릭 키. cellInfo.raw 와 동일 키(input|output|cacheWrite|cacheRead|requests).
+const METRIC_KEYS = ["input", "output", "cacheWrite", "cacheRead", "requests"];
+
+/**
+ * 활성일들의 5메트릭 산술평균(순수 함수). 상세 모달의 "평균 대비 ▲▼" 모수.
+ *   - EMPTY(나무 없는 빈 대지)·totalTokens 0(사용 없는 날)은 평균에서 제외 — 빈 날을 넣으면 평균이 0 쪽으로 왜곡된다.
+ *   - cellList 는 forestCellParams 결과 배열(date 오름차순). 각 원소의 raw{input,...} 와 stage 를 읽는다.
+ *   - totalTokens = 토큰 4종 합(요청 수 제외) — cellInfo 의 판정과 동일 기준.
+ * @param {object[]} cellList forestCellParams 결과 배열(없으면 빈 배열 취급)
+ * @returns {{input:number,output:number,cacheWrite:number,cacheRead:number,requests:number,count:number}}
+ *          메트릭별 평균과 모수에 든 활성일 수 count. count 0 이면 전부 0.
+ */
+export function metricAverages(cellList) {
+  const sum = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, requests: 0 };
+  let count = 0;
+  for (const c of cellList || []) {
+    const p = (c && c.params) || c || {};
+    const raw = p.raw || {};
+    if (p.stage === STAGE.EMPTY) continue; // 빈 대지 제외
+    const totalTokens =
+      num(raw.input) + num(raw.output) + num(raw.cacheWrite) + num(raw.cacheRead);
+    if (totalTokens <= 0) continue; // 사용 없는 날 제외
+    sum.input += num(raw.input);
+    sum.output += num(raw.output);
+    sum.cacheWrite += num(raw.cacheWrite);
+    sum.cacheRead += num(raw.cacheRead);
+    sum.requests += num(raw.requests);
+    count++;
+  }
+  const avg = { count };
+  for (const k of METRIC_KEYS) avg[k] = count > 0 ? sum[k] / count : 0;
+  return avg;
+}
+
+/**
+ * 그날 값이 전체 평균보다 위/아래인지(순수 함수). 평균 모수가 비었거나 값이 같으면 "eq".
+ * @param {number} value 그날 메트릭 raw 값
+ * @param {number} avg metricAverages 가 준 해당 메트릭 평균
+ * @returns {"up"|"down"|"eq"} value>avg → "up", value<avg → "down", 같거나 비교 불가 → "eq"
+ */
+export function compareToAvg(value, avg) {
+  const v = num(value), a = Number.isFinite(avg) ? avg : 0;
+  if (a <= 0) return "eq"; // 모수 없음(count 0 등)이면 표식 미표시
+  if (v > a) return "up";
+  if (v < a) return "down";
+  return "eq";
+}
+
+/**
+ * 평균 대비 방향 + 정도(삼각형 1~3개)를 산출(순수 함수). 상세 모달의 침엽수 뱃지가 읽는다.
+ *   - 상승률 = (value - avg) / avg, 하락률 = (avg - value) / avg. 경계는 상승·하락 동일.
+ *   - 33% 미만 → 1개, 66% 미만 → 2개, 66% 이상 → 3개. eq/모수없음 → level 0(뱃지 없음).
+ * @param {number} value 그날 메트릭 raw 값
+ * @param {number} avg metricAverages 가 준 해당 메트릭 평균
+ * @returns {{dir:"up"|"down"|"eq", level:0|1|2|3}} dir=방향, level=삼각형 개수(eq 면 0)
+ */
+export function avgBadge(value, avg) {
+  const dir = compareToAvg(value, avg);
+  if (dir === "eq") return { dir, level: 0 };
+  const v = num(value), a = avg; // dir!=="eq" 이면 compareToAvg 에서 a>0 보장
+  const rate = (dir === "up" ? v - a : a - v) / a; // 상승률/하락률 (양수)
+  const level = rate < 0.33 ? 1 : rate < 0.66 ? 2 : 3;
+  return { dir, level };
 }

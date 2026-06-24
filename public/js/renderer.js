@@ -13,11 +13,11 @@ import {
   layoutByPlacements, gridToScreen, TILE, GRID,
   MAP_GX0, MAP_GX1, MAP_GY0, MAP_GY1,
 } from "./grid.js";
-import { STAGE, REF } from "./metrics.js";
+import { STAGE, REF, metricAverages, compareToAvg, avgBadge } from "./metrics.js";
 import { AmbientParticles } from "./particles.js";
 import { sheet, rockSheet } from "./sprites.js";
 import { hash32 } from "./seed.js";
-import { PAL, PAL_PAST, LEAF_HI, leafPalFor, hexToRgb, mixHex } from "./render/palette.js";
+import { PAL, PAL_PAST, LEAF_HI, leafPalFor, hexToRgb, mixHex, skyColorsAt } from "./render/palette.js";
 import {
   drawGrassBlades, drawEmptyDirtPatch, drawPendingGround, drawClosedGround, drawGroundShadow,
   drawWaterPool, paintProceduralRock, pickVegSpecies,
@@ -181,6 +181,12 @@ export class ForestRenderer {
     this.skyH = 36;
 
     this.frame = 0;
+
+    // 시간대 하늘(작업 3): render 진입에서 로컬 시각(시+분/60)을 1회 읽어 채운다. 외부에서 명시
+    //   설정(테스트·스냅샷 고정 주입)되면 그 값을 우선해 결정성 유지. null = 아직 미설정(첫 render 에서 읽음).
+    this._skyHour = null;
+    // 외부가 시각을 고정 주입했는지 표시(true 면 render 가 시계를 다시 안 읽음 — 골든/스냅샷 결정성).
+    this._skyHourPinned = false;
 
     // 나무 스프라이트 시트 에셋(비동기 로드). 로드 전엔 절차 아트(폴백)로 그리고, 완료되면 모든 베이크
     //   캐시·맵 스냅샷을 1회 무효화해 시트로 전환한다. 실패 시 sheet.ready=false → 절차 아트 유지.
@@ -737,6 +743,9 @@ export class ForestRenderer {
       return;
     }
     this._contentSig = sig;
+    // 상세 모달 "평균 대비 ▲▼" 모수: 활성일 5메트릭 평균을 폴(콘텐츠 변경)마다 1회 캐시.
+    //   매 상세 표시마다 전체 재계산하지 않게 여기서 1회만(EMPTY·사용 0 날 제외는 metricAverages 내부).
+    this._metricAvg = metricAverages(cellList);
     // 배치된(active) 날이 하나도 없으면 빈 대지(흙만). cellList 자체는 비어있지 않을 수 있다.
     this.empty = Object.keys(map).length === 0;
     this.cells = layoutByPlacements(cellList, map);
@@ -1086,9 +1095,28 @@ export class ForestRenderer {
   }
 
   // ===================== 렌더 루프 =====================
+  /**
+   * 시간대 하늘 시각을 고정 주입(테스트·스냅샷 결정성). 호출하면 render 가 시계를 다시 안 읽는다.
+   * @param {number} hour 0~24 (시 + 분/60)
+   */
+  setSkyHour(hour) {
+    this._skyHour = hour;
+    this._skyHourPinned = true;
+  }
+
+  // 로컬 시각(시 + 분/60) 1 회 읽기 — Date 접근을 이 한 곳에만 격리(skyColorsAt 은 순수 유지).
+  //   비브라우저(테스트)에서도 동작하나, 결정성을 위해 테스트는 setSkyHour 로 고정 주입한다.
+  _readClockHour() {
+    const d = new Date();
+    return d.getHours() + d.getMinutes() / 60;
+  }
+
   render() {
     this.frame++;
     this._bakesThisFrame = 0; // 프레임 베이크 예산 리셋
+    // 시간대 하늘: 외부 고정 주입이 없으면 진입에서 시각을 1회 읽어 상태로 둔다(이후 _drawSky·
+    //   _renderOverview 가 이 주입값으로 skyColorsAt 호출). 하늘은 라이브(스냅샷 미포함)라 재베이크 0.
+    if (!this._skyHourPinned) this._skyHour = this._readClockHour();
     this.camera._stepCamAnim(); // 카메라 포커스 보간(있으면 1프레임 진행). 오버뷰 해제는 focusLastActive 가 함.
     // 오버뷰: 맵 전체 스냅샷을 축소 blit + 하늘만. 매 프레임 칠 비용 = drawImage 1회.
     if (this.camera.overview) {
@@ -1141,10 +1169,11 @@ export class ForestRenderer {
     const W = this.canvas.width, H = this.canvas.height;
     const snap = this._ensureMapSnapshot();
     c.imageSmoothingEnabled = false;
-    // 하늘(위 전체). 그라데이션은 맵 상단까지.
+    // 하늘(위 전체). 그라데이션은 맵 상단까지. 일반 모드 _drawSky 와 같은 시간대 색(주입 시각).
     const mapTop = snap ? Math.round(H - snap.snapH) : 0;
     const skyBottom = Math.max(0, Math.min(H, mapTop));
-    const c0 = hexToRgb(PAL.skyTop), c1 = hexToRgb(PAL.skyBot);
+    const sky = skyColorsAt(this._skyHour == null ? 12 : this._skyHour);
+    const c0 = sky.skyTop, c1 = sky.skyBot;
     for (let y = 0; y < skyBottom; y++) {
       const t = skyBottom > 1 ? y / (skyBottom - 1) : 0;
       const r = (c0.r + (c1.r - c0.r) * t) | 0;
@@ -1403,8 +1432,10 @@ export class ForestRenderer {
   _drawSky(b, W, H, hY) {
     if (hY <= 0) return; // 지평선이 화면 위 → 보이는 건 전부 땅
     const top = Math.min(hY, H);
+    // 시간대 하늘(작업 3): 주입 시각의 {skyTop, skyBot}. 단일 그라데이션 유지(2단 밴드 금지).
+    const sky = skyColorsAt(this._skyHour == null ? 12 : this._skyHour);
     // 부드러운 그라데이션(하드 밴드 제거). 위(skyTop)→아래(skyBot) 행별 보간.
-    const c0 = hexToRgb(PAL.skyTop), c1 = hexToRgb(PAL.skyBot);
+    const c0 = sky.skyTop, c1 = sky.skyBot;
     for (let y = 0; y < top; y++) {
       const t = top > 1 ? y / (top - 1) : 0; // 0(위)~1(지평선)
       const r = (c0.r + (c1.r - c0.r) * t) | 0;
@@ -1415,7 +1446,8 @@ export class ForestRenderer {
     }
     // 지평선 헤이즈: 하늘 바닥(skyBot)과 풀밭(grassA) 사이 하드 라인 제거 — 가는 띠로 옅게 안개처럼
     //   섞어 자연스러운 경계. 하늘→옅은 안개색→풀밭으로 몇 줄 보간(어중간한 컷 방지).
-    const g0 = hexToRgb(PAL.skyBot), g1 = hexToRgb(PAL.grassA);
+    //   상단은 시간대 skyBot 을 따라가고 하단은 땅(grassA, 불변) — 시각 따라 경계가 자연히 어우러진다.
+    const g0 = c1, g1 = hexToRgb(PAL.grassA);
     const hazeH = Math.min(10, Math.max(4, (top * 0.12) | 0));
     for (let i = 0; i < hazeH; i++) {
       const yy = top - hazeH + i;
@@ -3026,6 +3058,32 @@ export class ForestRenderer {
     const num = (v) => (v || 0).toLocaleString("en-US");
     // 상세 모달 구체화: 수종·시드·정규화 비중 노출(rows 는 무회귀 유지).
     const sp = p.species != null ? p.species : this.sheet.speciesFor(p.seed || p.date);
+    //   totalTokens = 토큰 4종 합(요청 수 제외) — 0 이면 평균 대비 표식을 그리지 않는다.
+    const totalTokens =
+      (raw.input || 0) + (raw.output || 0) + (raw.cacheWrite || 0) + (raw.cacheRead || 0);
+    // 평균 대비 표식(▲/▼): 그날 raw 값 vs 활성일 평균(setData 가 1회 캐시한 _metricAvg).
+    //   totalTokens 0(사용 없는 날)은 표식 미표시(빈 객체) — 모수에서도 빠진 날이라 비교 의미 없음.
+    const avg = this._metricAvg || {};
+    const avgCompare = totalTokens > 0
+      ? {
+          requests: compareToAvg(raw.requests, avg.requests),
+          input: compareToAvg(raw.input, avg.input),
+          output: compareToAvg(raw.output, avg.output),
+          cacheWrite: compareToAvg(raw.cacheWrite, avg.cacheWrite),
+          cacheRead: compareToAvg(raw.cacheRead, avg.cacheRead),
+        }
+      : null;
+    // 침엽수 뱃지({dir,level}): 방향 + 평균 대비 정도(삼각형 1~3개). 상세 모달 표시 전용.
+    //   avgCompare(방향 문자열)는 계약 유지(무회귀), 뱃지는 별도 필드로 더한다.
+    const avgBadges = totalTokens > 0
+      ? {
+          requests: avgBadge(raw.requests, avg.requests),
+          input: avgBadge(raw.input, avg.input),
+          output: avgBadge(raw.output, avg.output),
+          cacheWrite: avgBadge(raw.cacheWrite, avg.cacheWrite),
+          cacheRead: avgBadge(raw.cacheRead, avg.cacheRead),
+        }
+      : null;
     return {
       date: p.date,
       empty: false,
@@ -3036,6 +3094,16 @@ export class ForestRenderer {
       species: sp,
       norms: p.norms || null, // {inputN,...} logNorm — 나무 렌더용(상세 표시엔 linPct 사용)
       linPct: p.linPct || null, // 상세 표시 전용 선형 비중(역대 최대 대비, raw/refMax)
+      avgCompare, // 메트릭별 평균 대비 {requests,input,...} = "up"|"down"|"eq" (없으면 null)
+      avgBadges, // 메트릭별 침엽수 뱃지 {requests,input,...} = {dir,level} (없으면 null)
+      totalTokens, // 토큰 4종 합 — 0 이면 평균 대비 표식 미표시
+      raw: { // 원시 수치(툴팁 한글 약식용). rows 는 정밀 콤마 유지(상세 모달).
+        requests: raw.requests || 0,
+        input: raw.input || 0,
+        output: raw.output || 0,
+        cacheWrite: raw.cacheWrite || 0,
+        cacheRead: raw.cacheRead || 0,
+      },
       rows: [
         ["Requests", num(raw.requests)],
         ["Input Tokens", num(raw.input)],

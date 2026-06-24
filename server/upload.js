@@ -15,7 +15,10 @@ import { fileURLToPath } from 'url';
 import { scanUsageData } from './aggregate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_PATH = path.join(__dirname, '..', 'data', 'upload-config.json');
+// store.js 와 동일: FOREST_DATA_DIR(패키징 시 메인이 userData 로 주입) 우선, 없으면 개발 경로.
+//   이 처리가 없으면 패키징본에서 data/ 가 asar(읽기 전용) 안이라 설정 저장이 매번 실패한다.
+const DATA_DIR = process.env.FOREST_DATA_DIR || path.join(__dirname, '..', 'data');
+const CONFIG_PATH = path.join(DATA_DIR, 'upload-config.json');
 
 // env / 코드 기본값(파일 부재 시 폴백).
 const DEFAULTS = {

@@ -25,6 +25,7 @@ function createWindow(port) {
     width: 1400,
     height: 900,
     minWidth: 780,
+    minHeight: 470, // 16:9 비율 439 + HUD 상하 여유(실측 보정)
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

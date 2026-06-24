@@ -133,3 +133,54 @@ export function mixHex(a, c, t) {
   const x = hexToRgb(a), y = hexToRgb(c);
   return `rgb(${(x.r + (y.r - x.r) * t) | 0},${(x.g + (y.g - x.g) * t) | 0},${(x.b + (y.b - x.b) * t) | 0})`;
 }
+
+// 시간대 하늘 키프레임 — 로컬 시각(0~24)에 따른 하늘 {skyTop, skyBot}.
+//   야간 남색(0/24·22시) → 새벽 보라끼(6시) → 한낮 맑은 파랑(12시) → 황혼 주황·분홍(18시).
+//   12시는 기존 PAL.skyTop/skyBot 와 동일(정오 골든 보존). 야간은 콘텐츠(금가루·붉은 깃발·나무)
+//   대비를 깨지 않게 검정 아닌 남색(밑동은 박명 잔광으로 약간 밝게).
+//   24시=0시(wrap) — skyColorsAt 가 마지막 키→첫 키를 이어 매끄럽게 닫는다.
+const SKY_KEYFRAMES = [
+  { hour: 0,  skyTop: "#1a2747", skyBot: "#2e3e63" }, // 한밤 남색
+  { hour: 6,  skyTop: "#4a4a7a", skyBot: "#c98a8a" }, // 새벽 보라끼·분홍 박명
+  { hour: 12, skyTop: "#7ec8f0", skyBot: "#bfe6f7" }, // 한낮 맑은 파랑(= 기존 PAL)
+  { hour: 18, skyTop: "#5a6db0", skyBot: "#f0a060" }, // 황혼 주황·분홍 지평선
+  { hour: 22, skyTop: "#1f2c50", skyBot: "#33446a" }, // 야간 복귀(0시로 매끄럽게)
+];
+
+/** 두 #rrggbb 를 t(0~1) 보간해 {r,g,b} 로 반환(하늘 행별 보간 입력용 — mixHex 와 달리 rgb 객체). */
+function mixRgb(a, c, t) {
+  const x = hexToRgb(a), y = hexToRgb(c);
+  return {
+    r: (x.r + (y.r - x.r) * t) | 0,
+    g: (x.g + (y.g - x.g) * t) | 0,
+    b: (x.b + (y.b - x.b) * t) | 0,
+  };
+}
+
+/**
+ * 로컬 시각(0~24 실수)의 하늘 색. 순수·결정적 — Date 를 직접 읽지 않는다(시각은 호출부가 주입).
+ *   키프레임 사이는 선형 보간, 22시~24시(=0시)는 wrap 으로 이어 하루가 닫힌다.
+ * @param {number} hour 0~24 (시 + 분/60). 범위 밖은 24로 모듈로 래핑.
+ * @returns {{skyTop:{r,g,b}, skyBot:{r,g,b}}} 하늘 위/아래 색(행별 보간 입력용 rgb 객체)
+ */
+export function skyColorsAt(hour) {
+  let h = hour % 24;
+  if (h < 0) h += 24;
+  const ks = SKY_KEYFRAMES;
+  // 기본 = wrap 구간(마지막 키 → 첫 키, 거리에 +24 보정). h 가 내부 구간에 들면 거기로 교체.
+  let a = ks[ks.length - 1], b = ks[0], span = ks[0].hour + 24 - a.hour;
+  for (let i = 0; i < ks.length - 1; i++) {
+    if (h >= ks[i].hour && h < ks[i + 1].hour) {
+      a = ks[i]; b = ks[i + 1]; span = b.hour - a.hour;
+      break;
+    }
+  }
+  // wrap 구간이면 h 가 첫 키(0시) 미만일 때 한 바퀴(+24) 더해 거리 계산이 양수가 되게.
+  let hh = h;
+  if (h < ks[0].hour && a.hour > b.hour) hh = h + 24;
+  const t = span > 0 ? (hh - a.hour) / span : 0;
+  return {
+    skyTop: mixRgb(a.skyTop, b.skyTop, t),
+    skyBot: mixRgb(a.skyBot, b.skyBot, t),
+  };
+}

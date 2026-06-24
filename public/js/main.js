@@ -419,6 +419,8 @@ async function boot() {
             if (p && Number.isFinite(p.gx)) cells.push({ gx: p.gx, gy: p.gy });
           }
           if (cells.length) renderer.playBundleEffect(cells);
+          // 작업2(B): 묶임 false→true 순간 완성 토스트 1회(lastBundled 가드로 ym 당 1회 보장).
+          ui.showBundleToast(ym);
         }
       }
     }
