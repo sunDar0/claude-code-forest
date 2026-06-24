@@ -12,7 +12,9 @@
       padding: 0;
       height: 100%;
       min-width: 780px;
-      /* §64: 화면 최소 너비 780px 고정 — 좁아지면 가로 스크롤(레이아웃 780 유지). */
+      min-height: 470px;
+      /* §64: 화면 최소 너비 780px·최소 높이 470px(16:9 비율 439 + HUD 상하 여유, 실측 보정) 고정.
+         좁으면 가로 스크롤, 높이는 레터박스라 세로 스크롤 없이 470 보장. */
       background: #0b1622;
       overflow-x: auto;
       overflow-y: hidden;
