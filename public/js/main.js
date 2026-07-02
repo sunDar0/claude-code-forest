@@ -438,6 +438,17 @@ async function boot() {
     return { x: (clientX - rect.left) * sx, y: (clientY - rect.top) * sy };
   };
 
+  // 미니맵 클릭/드래그 → 그 지점을 화면 중앙으로 팬(역변환·클램프는 renderer.minimapPanTo 소유).
+  const miniPanTo = (clientX, clientY) => {
+    if (!miniCanvas) return;
+    const rect = miniCanvas.getBoundingClientRect();
+    const sx = miniCanvas.width / (rect.width || 1);
+    const sy = miniCanvas.height / (rect.height || 1);
+    const mx = (clientX - rect.left) * sx;
+    const my = (clientY - rect.top) * sy;
+    renderer.minimapPanTo(mx, my, miniCanvas.width, miniCanvas.height);
+  };
+
   // 휠 줌: 오늘 그리드 피벗, 정수 단계. 위로(휠 업)=줌인.
   canvas.addEventListener(
     "wheel",
@@ -457,6 +468,7 @@ async function boot() {
   let lastX = 0, lastY = 0;
   let downX = 0, downY = 0;
   const DRAG_THRESH = 4; // px
+  let miniDragging = false; // 미니맵 드래그 중(메인 캔버스 호버와 분리)
 
   canvas.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
@@ -468,6 +480,7 @@ async function boot() {
   });
 
   window.addEventListener("mousemove", (e) => {
+    if (miniDragging) { miniPanTo(e.clientX, e.clientY); return; } // 미니맵 드래그 중엔 메인 호버 생략
     const p = toCanvasPx(e.clientX, e.clientY);
     if (dragging) {
       const rect = canvas.getBoundingClientRect();
@@ -579,6 +592,25 @@ async function boot() {
     ui.hideTooltip();
   });
   canvas.addEventListener("dragstart", (e) => e.preventDefault());
+
+  // 미니맵 드래그 내비게이션: 클릭/드래그한 지점을 화면 중앙으로 팬. 심는 중에는 막는다.
+  //   mouseup 은 window 에서 받아 미니맵 밖에서 떼도 풀리게 한다(드래그 중 커서가 박스를 벗어나도 추종).
+  if (miniCanvas) {
+    miniCanvas.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      if (ui.isPlanting()) return;
+      miniDragging = true;
+      miniCanvas.style.cursor = "grabbing";
+      miniPanTo(e.clientX, e.clientY); // 클릭 즉시 그 지점으로
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    window.addEventListener("mouseup", () => {
+      if (!miniDragging) return;
+      miniDragging = false;
+      miniCanvas.style.cursor = "grab";
+    });
+  }
 
   setupHudToggle(renderer);
 

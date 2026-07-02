@@ -3196,4 +3196,28 @@ export class ForestRenderer {
     mctx.strokeRect(Math.round(cx0) + 0.5, Math.round(cy0) + 0.5, Math.max(1, Math.round(cx1 - cx0)), Math.max(1, Math.round(cy1 - cy0)));
   }
 
+  /**
+   * 미니맵 클릭/드래그 내비게이션: 미니맵 px (mx,my) 아래 월드 지점을 화면 중앙으로 팬한다.
+   *   drawMinimap 의 mapX/mapY 역변환(같은 s·landTop). 오버뷰면 무시(뷰포트 사각이 맵 전체라
+   *   팬 의미 없음).
+   * @param {number} mx 미니맵 캔버스 px x
+   * @param {number} my 미니맵 캔버스 px y
+   * @param {number} mw 미니맵 캔버스 너비
+   * @param {number} mh 미니맵 캔버스 높이
+   * @returns {boolean} 팬했으면 true(오버뷰로 무시하면 false).
+   */
+  minimapPanTo(mx, my, mw, mh) {
+    if (this.camera.overview) return false;
+    const m = this._mapWorldBounds();
+    const wW = Math.max(1, m.x1 - m.x0);
+    const s = mw / wW;
+    const landH = (m.y1 - m.y0) * s;
+    const landTop = mh - landH;
+    // 미니맵 px → 월드(drawMinimap mapX/mapY 의 역).
+    const worldX = m.x0 + mx / s;
+    const worldY = m.y0 + (my - landTop) / s;
+    this.camera.centerOnWorld(worldX, worldY);
+    return true;
+  }
+
 }

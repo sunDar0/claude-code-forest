@@ -59,15 +59,20 @@ export class Camera {
   zoomAt(cx, cy, dir) {
     if (this.overview) {
       if (dir < 0) return; // 오버뷰가 줌아웃 끝
-      // 오버뷰 → zoomMin 정수 줌. 복귀 시 화면 중앙 아래 월드 지점을 화면 중앙에 두고 클램프.
+      // 오버뷰 → zoomMin 정수 줌. 복귀 시 커서 아래 월드 지점을 커서 위치에 유지(피벗 일관).
       const snap = this.host._mapSnapshot;
+      // 오버뷰 캔버스에서 맵은 하단 정렬(위는 하늘 밴드) — _renderOverview 가 mapTop=캔버스높이-snapH
+      //   부터 스냅샷을 그린다. 그래서 커서 y → 스냅샷 y 역변환에 이 상단 오프셋(mapTop)을 빼야 한다.
+      //   빠뜨리면 세로로 어긋나 엉뚱한(맵 하단 쪽) 지점이 피벗으로 잡힌다. 캔버스 높이는 _recompute 가
+      //   바꾸기 전 오버뷰 값(= viewport 높이)으로 잡는다.
+      const overviewH = Math.max(CELL_SPAN, this.host._viewport().h);
       this.overview = false;
       this.cam.zoom = this.zoomMin;
       this.host._recompute();
       if (snap) {
-        // 오버뷰에서 커서 아래 월드 지점을 복귀 후에도 커서 위치에 유지(피벗 일관).
+        const mapTop = overviewH - snap.snapH;
         const worldX = snap.offX + cx / snap.scale;
-        const worldY = snap.offY + cy / snap.scale;
+        const worldY = snap.offY + (cy - mapTop) / snap.scale;
         this.cam.x = worldX - cx / this.cam.zoom;
         this.cam.y = worldY - cy / this.cam.zoom;
       }
@@ -102,6 +107,18 @@ export class Camera {
   pan(dx, dy) {
     this.cam.x -= dx / this.cam.zoom;
     this.cam.y -= dy / this.cam.zoom;
+    this._clampPan();
+  }
+
+  /**
+   * 주어진 월드 좌표를 화면(뷰포트) 중앙에 두도록 카메라를 옮긴다. 미니맵 클릭/드래그 내비게이션용.
+   * 팬과 같은 맵 경계 클램프를 적용한다. 줌은 건드리지 않는다.
+   * @param {number} wx 월드 x
+   * @param {number} wy 월드 y
+   */
+  centerOnWorld(wx, wy) {
+    this.cam.x = wx - this.host.bufW / 2;
+    this.cam.y = wy - this.host.bufH / 2;
     this._clampPan();
   }
 

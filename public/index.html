@@ -977,20 +977,19 @@
       display: none;
       /* main 이 줌인 시에만 표시 */
       z-index: 12;
-      pointer-events: none;
-      /* 표시만(시야 방해 0) */
+      pointer-events: auto;
+      /* 드래그로 카메라 이동(클릭 지점이 화면 중앙) */
+      cursor: grab;
       opacity: 0.9;
     }
 
     /* §55 숲 생성 버튼(#bundle-btn) CSS 폐기 — 서버 자동 묶기. */
     /* §41 "마지막 활성 그리드 찾기"(지도 앱 내 위치): 우하단 원형 버튼. */
     #locate-btn {
-      /* §64: 하단 패널(#hud-bottom) 오른쪽 20px·세로 중앙에 고정(패널 따라 이동). */
-      position: absolute;
-      left: 100%;
-      margin-left: 20px;
-      top: 50%;
-      transform: translateY(-50%);
+      /* 우하단 화면 코너 고정. #hud-bottom 밖(#ui 직속)이라 HUD 접힘과 무관하게 유지된다. */
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
       width: 40px;
       height: 40px;
       background: rgba(28, 40, 50, 0.92);
@@ -1152,9 +1151,9 @@
           <div class="val cl-req" id="b-req">—</div>
         </div>
       </div>
-      <!-- §41 마지막 활성 그리드 찾기. 하단 패널 오른쪽 20px(§64). main 이 표시·클릭 배선. -->
-      <button id="locate-btn" title="마지막 활성 그리드로 이동">📍</button>
     </div>
+    <!-- §41 마지막 활성 그리드 찾기. 우하단 고정(HUD 접힘과 무관하게 유지). main 이 표시·클릭 배선. -->
+    <button id="locate-btn" title="마지막 활성 그리드로 이동">📍</button>
 
     <!-- 상태 -->
     <div id="offline">● 오프라인</div>

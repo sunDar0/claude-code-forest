@@ -22,8 +22,9 @@ let mainWindow = null;
 
 function createWindow(port) {
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    // 시작 크기 = 최소 크기(고정 아님 — resizable 기본값이라 사용자가 키울 수 있음).
+    width: 780,
+    height: 470,
     minWidth: 780,
     minHeight: 470, // 16:9 비율 439 + HUD 상하 여유(실측 보정)
     webPreferences: {
