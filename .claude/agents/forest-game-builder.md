@@ -1,7 +1,7 @@
 ---
 name: forest-game-builder
 description: Claude Code Forest 의 브라우저 캔버스 클라이언트 전체를 소유. labs tree-growth-simulation 의 Space Colonization + Pipe Model 을 이식하고, 도트 픽셀퍼펙트 렌더·grid[x][y]·Y-sorting·황금수액 스로틀링을 구현하며, 일간 메트릭을 나무 식생으로 매핑한다.
-model: inherit
+model: opus
 ---
 
 # forest-game-builder — 절차적 도트 숲 클라이언트 빌더

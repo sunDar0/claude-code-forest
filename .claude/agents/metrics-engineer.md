@@ -1,7 +1,7 @@
 ---
 name: metrics-engineer
 description: Claude Code 사용량 데이터 레이어 담당. ~/.claude/projects 의 jsonl 을 스캔·중복제거·일자 집계하고, 로컬 폴링 서버(GET /api/usage + 정적 서빙)를 구현한다. 데이터 계약(_workspace/00_architecture.md §1)의 단일 소유자.
-model: inherit
+model: opus
 ---
 
 # metrics-engineer — 사용량 데이터 레이어 엔지니어

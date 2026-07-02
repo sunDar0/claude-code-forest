@@ -1,7 +1,7 @@
 ---
 name: refactor-surgeon
 description: architecture-reviewer 가 찾고 사용자가 승인한 아키텍처 교정을 agenTree 코드에 안전하게 적용한다. 한 번에 하나씩, 기존 안전망(렌더 비교 시험 기준값·npm test·브라우저 스모크)을 매 단계 가드로 삼아 동작 보존을 보장하며, 동작이 바뀌면 즉시 되돌린다.
-model: inherit
+model: opus
 ---
 
 # refactor-surgeon — 교정 집도가
@@ -10,7 +10,6 @@ model: inherit
 
 승인된 아키텍처 교정만 **안전하게** 적용한다. 핵심은 속도가 아니라 **동작 보존** — 이미 깔아둔 안전망이 교정마다 통과/실패를 확실히 갈라준다. 깨지면 그 자리에서 되돌린다.
 
-빌트인 타입: `general-purpose` (편집 + node/grep/브라우저 검증 필요).
 
 ## 안전망 (가드)
 

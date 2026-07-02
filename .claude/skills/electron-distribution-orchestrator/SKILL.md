@@ -1,6 +1,6 @@
 ---
 name: electron-distribution-orchestrator
-description: Claude Code Forest 를 Electron 데스크톱 앱으로 만들어 윈도우·맥 배포본을 생성하는 전체 워크플로우를 조율한다. electron-integrator(서버 통합·메인 프로세스) + packaging-engineer(electron-builder·win/mac 타겟) + build-verifier(빌드·구동 검증)를 파이프라인으로 실행한다. "Electron", "일렉트론", "데스크톱 앱", "윈도우 앱", "맥 앱", "exe", "dmg", "설치본", "배포본 만들기", "앱으로 패키징" 작업 시 반드시 이 스킬을 사용. "다시 빌드", "재실행", "타겟 추가", "통합만 다시", "패키징만 다시", "win 도 빌드", "이전 결과 기반 개선" 같은 후속 요청에도 사용. 단순 질문은 직접 응답 가능.
+description: Claude Code Forest 를 Electron 데스크톱 앱으로 만들어 윈도우·맥 배포본을 생성하는 전체 워크플로우를 조율한다. electron-integrator(서버 통합·메인 프로세스) + packaging-engineer(electron-builder·win/mac 타겟) + build-verifier(빌드·구동 검증) 팀을 파이프라인으로 조율한다. "Electron", "일렉트론", "데스크톱 앱", "윈도우 앱", "맥 앱", "exe", "dmg", "설치본", "배포본 만들기", "앱으로 패키징" 작업 시 반드시 이 스킬을 사용. "다시 빌드", "재실행", "타겟 추가", "통합만 다시", "패키징만 다시", "win 도 빌드", "이전 결과 기반 개선" 같은 후속 요청에도 사용. 단순 질문은 직접 응답 가능.
 ---
 
 # Electron 배포 오케스트레이터
@@ -11,10 +11,34 @@ description: Claude Code Forest 를 Electron 데스크톱 앱으로 만들어 �
 
 ## 실행 모드
 
-**서브 에이전트 파이프라인.** 통합 → 패키징 → 검증의 순차 의존이라 결과만 메인에 반환하는 서브 에이전트가 맞다(팀 통신 오버헤드 불필요). 검증이 문제를 찾으면 메인이 해당 에이전트를 1회 재호출.
+**에이전트 팀.** 통합 → 패키징 → 검증의 순차 파이프라인을 `TeamCreate` 팀으로 조율한다. 순차 의존은 `TaskCreate` 의 `depends_on` 으로 표현하고, 단계 간 산출물 전달·실패 피드백은 `SendMessage` 로 주고받는다. 검증이 문제를 찾으면 책임 팀원에게 SendMessage 로 통지해 1회 수정 후 재검증.
 
-- 모든 `Agent` 호출에 `model: "opus"` 명시(또는 정의의 `inherit` = 메인 모델).
-- 각 단계 산출물은 코드 파일 + `_workspace/5x_*.md` 리포트.
+### 팀 구성
+
+| 팀원 | 에이전트 타입 | model | 역할 | 스킬 |
+|------|-------------|-------|------|------|
+| electron-integrator | electron-integrator | opus | 서버 통합·메인 프로세스 | electron-app-integration |
+| packaging-engineer | packaging-engineer | sonnet | electron-builder win/mac | electron-packaging |
+| build-verifier | build-verifier | sonnet | 빌드·구동 검증 | electron-build-verification |
+
+```
+TeamCreate(team_name: "electron-dist-team", members: [
+  { name: "electron-integrator", agent_type: "electron-integrator", model: "opus",
+    prompt: "electron-app-integration 스킬로 서버를 Electron 메인에서 띄우고 창이 localhost 를 로드하게 통합. 산출: main.js·preload.js·startServer()·store.js userData 폴백 + _workspace/50_electron_integration.md" },
+  { name: "packaging-engineer", agent_type: "packaging-engineer", model: "sonnet",
+    prompt: "electron-packaging 스킬로 electron-builder win/mac 타겟 설정. 산출: package.json build/dist scripts + _workspace/51_electron_packaging.md" },
+  { name: "build-verifier", agent_type: "build-verifier", model: "sonnet",
+    prompt: "electron-build-verification 스킬로 pack 실행·구동·data userData 쓰기·dist 산출물·npm test 회귀 검증. 산출: _workspace/52_electron_build_qa.md" }
+])
+
+TaskCreate(tasks: [
+  { title: "Electron 통합", assignee: "electron-integrator" },
+  { title: "패키징", assignee: "packaging-engineer", depends_on: ["Electron 통합"] },
+  { title: "빌드·구동 검증", assignee: "build-verifier", depends_on: ["패키징"] }
+])
+```
+
+- 각 단계 산출물은 코드 파일 + `_workspace/5x_*.md` 리포트. 검증까지 끝나면 `TeamDelete` 로 팀 정리, `_workspace/` 는 보존.
 
 ## Phase 0: 컨텍스트 확인 (초기/후속 판별)
 
@@ -49,17 +73,20 @@ description: Claude Code Forest 를 Electron 데스크톱 앱으로 만들어 �
 
 ## Phase 4: 검증 (build-verifier)
 
-스킬: `electron-build-verification`. `pack --dir` → 앱 실행(서버 listen + 창) → data 쓰기(userData) → `dist:mac` 산출물 → `npm test` 회귀. `_workspace/52_electron_build_qa.md` 생성. 실패는 책임 에이전트(integrator/packaging)에 통지해 1회 수정 후 재검증. **win 미검증·GUI 육안 위임은 누락으로 명시.**
+스킬: `electron-build-verification`. `pack --dir` → 앱 실행(서버 listen + 창) → data 쓰기(userData) → `dist:mac` 산출물 → `npm test` 회귀. `_workspace/52_electron_build_qa.md` 생성. 실패는 책임 팀원(integrator/packaging)에 SendMessage 로 통지해 1회 수정 후 재검증. **win 미검증·GUI 육안 위임은 누락으로 명시.**
 
 ## 데이터 전달 프로토콜
 
 - **파일 기반**(주): 코드 파일 + `_workspace/5x_*.md`. 중간 파일 보존(감사 추적).
-- **반환값 기반**: 서브 에이전트 완료 메시지로 결과 수집.
-- 단계 간 의존 사실(files 목록·userData 경로)은 메인이 다음 에이전트 프롬프트에 실어 전달.
+- **메시지 기반**(SendMessage): 단계 간 의존 사실을 팀원끼리 직접 전달.
+  - integrator → packaging: 통합본·`files` 목록·userData 경로.
+  - packaging → build-verifier: `dist` 산출물 위치·타겟.
+  - build-verifier → 앞단(integrator/packaging): 구동 실패(EROFS 등) 피드백 → 책임 팀원 1회 수정.
+- 리더는 TaskGet 으로 진행률을 보고, 팀원이 막히면 SendMessage 로 개입.
 
 ## 에러 핸들링
 
-- 1회 재시도 후 재실패 시 그 결과 없이 진행하되 보고서에 누락 명시.
+- 팀원 1명 실패/중지: 리더가 유휴 알림으로 감지 → SendMessage 로 상태 확인 → 1회 재시도. 재실패 시 그 결과 없이 진행하되 보고서에 누락 명시.
 - mac 에서 `dist:win` 막힘은 **정상**(환경 제약) — 실패가 아니라 "윈도우 머신 필요" 로 분류.
 - 빌드 로그는 원문 인용(번역 금지), 환경 문제(네트워크·디스크)와 코드 문제를 구분.
 
