@@ -135,6 +135,10 @@ function estimateCaps(blocks, fiveHourPct) {
   return {
     fiveHourCapTokens: Math.round(fiveHourCapTokens),
     dailyCapTokens: Math.round(2 * fiveHourCapTokens), // 하루 ≈ 5시간 윈도우 2개.
+    // 나무 단계 분모 전용 — 항상 관측 p85(robustRef)×2. statusline 역산(fiveHourPct)을
+    //   쓰지 않는다: 5h % 가 낮게 읽히는 순간 inverse 가 폭발해(90%→cap 155M, 1%→cap 8G)
+    //   나무가 통째로 묘목으로 붕괴하기 때문. 관측 p85 는 % 요동과 무관해 분모가 안정적.
+    treeDailyDenom: robustRef > 0 ? Math.round(2 * robustRef) : Math.round(2 * fiveHourCapTokens),
     capSource,
   };
 }
@@ -187,6 +191,7 @@ export async function scanUsageData() {
     return {
       daily: [],
       dailyCapTokens: 2,
+      treeDailyDenom: 2,
       fiveHourPct: null,
       sevenDayPct: null,
       fiveHourCapTokens: 1,
@@ -293,11 +298,12 @@ export async function scanUsageData() {
   const blocks = buildFiveHourBlocks(blockMessages);
   const fiveHourPct = await readPct('fiveHour', 'five_hour');
   const sevenDayPct = await readPct('sevenDay', 'seven_day');
-  const { fiveHourCapTokens, dailyCapTokens, capSource } = estimateCaps(blocks, fiveHourPct);
+  const { fiveHourCapTokens, dailyCapTokens, treeDailyDenom, capSource } = estimateCaps(blocks, fiveHourPct);
 
   return {
     daily,
     dailyCapTokens,
+    treeDailyDenom, // 나무 단계 분모(관측 p85×2, 안정). computeTree 가 이 값을 쓴다.
     fiveHourPct, // 캐시에서 읽은 % (없으면 null).
     sevenDayPct, // 캐시에서 읽은 7일 % (없으면 null).
     fiveHourCapTokens,
@@ -331,6 +337,7 @@ export async function aggregateForStore() {
   return {
     byDate,
     dailyCapTokens: result.dailyCapTokens,
+    treeDailyDenom: result.treeDailyDenom,
     fiveHourPct: result.fiveHourPct,
     sevenDayPct: result.sevenDayPct,
     fiveHourCapTokens: result.fiveHourCapTokens,
