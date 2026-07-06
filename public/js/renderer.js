@@ -52,6 +52,10 @@ const CELL_SPAN = GRID; // 한 그리드 월드 px = 3*TILE = 96
 //   GRID(=96px) = 그리드 1칸. 한 칸 미만 팬은 마진 안에서 흡수된다.
 const GROUND_BAKE_MARGIN = GRID;
 
+// 호버 스포트라이트: 툴팁이 뜬 동안 대상이 아닌 나무·숲 스프라이트에 적용하는 반투명 알파(상수 —
+//   렌더 순수성 위해 시간/난수 금지). 풀·흙 등 정적 바닥은 대상 아님(맨 나무·숲 군집만).
+const HOVER_FADE_ALPHA = 0.35;
+
 // 식생(풀·그늘·흙) 렌더 계수를 한 객체로 모은다 — 단위 4 트윅 패널이 이걸 드래그로 수정한다.
 //   렌더 코드는 하드코딩 대신 이 값을 읽는다. 단위 2 가 실제 소비하는 키는 D(shadowRadiusFactor·
 //   shadowGrassAtten·grassLushness)뿐. forestDensityCoef·boundaryNoise 는 정의만 — 단위 3·4가 연결.
@@ -570,6 +574,9 @@ export class ForestRenderer {
   _drawLeafOverlay(b, ox, oy) {
     const MARGIN = GRID * 2;
     const W = this.bufW, H = this.bufH;
+    // 나무 본체와 같은 스포트라이트를 잎 오버레이에도 적용 — 페이드된 나무 위에 또렷한 잎이 뜨는
+    //   시각 불일치 방지. 낱개 나무만 그리므로 대상은 hoverCell(비묶음) 뿐.
+    const spot = this._hoverSpotlight();
     for (const cell of this.cells) {
       if (cell.bundled) continue; // 묶인 숲 군집은 금가루·나비가 담당(여기 제외)
       const st = cell.params.stage;
@@ -581,6 +588,9 @@ export class ForestRenderer {
       const sx = (sc.x + off.x * TILE) | 0;
       const sy = (sc.y + off.y * TILE) | 0;
       if (sx < -MARGIN || sx > W + MARGIN || sy < -GRID * 4 || sy > H + MARGIN) continue;
+      // 스포트라이트 대상 나무가 아니면 잎도 본체와 같은 알파로 페이드(그린 뒤 아래에서 복원).
+      const fade = spot && !(spot.cell && spot.cell.gx === cell.gx && spot.cell.gy === cell.gy);
+      if (fade) b.globalAlpha = HOVER_FADE_ALPHA;
       const baseY = sy + 5; // 나무 밑동(땅 접지)
       const crownHalf = (this._footprintWidth(st) * 0.5) | 0; // 수관 반폭
       // 수관 세로 범위(밑동 위). 단계별 키 높이 어림: YOUNG 낮고 MATURE 높음.
@@ -634,7 +644,9 @@ export class ForestRenderer {
         if (prog > 0.9 && (this.frame & 1)) continue; // 끝에서 깜빡 페이드
         b.fillRect(fx, fy, 1, 1);
       }
+      if (fade) b.globalAlpha = 1; // 이 나무 잎 끝 → 알파 복원(다음 나무 선명)
     }
+    if (spot) b.globalAlpha = 1; // 호버 시에만 방어 복원(비호버 경로 ops 0 — 골든 지문 불변 게이트)
   }
 
   /**
@@ -1840,14 +1852,37 @@ export class ForestRenderer {
     // 그리기 직전 Y-sort: 화면 위(작은 y)부터 → 아래(큰 y)가 앞. 호버는 위치를 바꾸지 않는다(떠오름 폐기)
     //   — 마우스 오버 강조는 _drawHoverHighlight(옅은 녹색 외곽선)가 render 패스에서 별도로 그린다.
     objs.sort((a, c) => a.y - c.y);
+    // 호버 스포트라이트: 툴팁 대상(호버 칸 나무 또는 호버 숲)만 선명, 나머지 나무·숲은 반투명.
+    //   오버뷰/스냅샷 합성 경로에선 비활성(_drawHoverHighlight 와 동일 가드) — 페이드가 맵 스냅샷에
+    //   구워지는 회귀 방지(§ 오버뷰 스냅샷 함정). 바위·물·깃발·식생·바닥은 대상 아님.
+    const spot = this._hoverSpotlight();
     for (const o of objs) {
+      const fade = spot && (
+        (o.kind === "tree" && !(spot.cell && spot.cell.gx === o.cell.gx && spot.cell.gy === o.cell.gy)) ||
+        (o.kind === "forest" && spot.ym !== o.ym)
+      );
+      if (fade) b.globalAlpha = HOVER_FADE_ALPHA;
       if (o.kind === "tree") this._drawTree(b, o.cell, o.sx, o.sy);
       else if (o.kind === "forest") this._drawForest(b, o.ym, o.cluster, o.ox, o.oy);
       else if (o.kind === "rock") this._drawVolumeRock(b, o.sx, o.sy, o.tx, o.ty); // 입체 바위
       else if (o.kind === "pool") drawWaterPool(b, o.sx, o.sy, o.tx, o.ty); // 물 웅덩이(장식)
       else if (o.kind === "flag") this._drawLastActiveFlag(b, o.ox, o.oy); // Y-sort 편입 깃발
       else drawDecor(b, o.tx, o.ty, o.sx, o.sy, o.density, o.veg, this.frame); // 식생 개수 + 종류 비중
+      if (fade) b.globalAlpha = 1; // 그린 직후 즉시 복원(누수 방지)
     }
+    if (spot) b.globalAlpha = 1; // 호버 시에만 방어 복원(비호버 경로 ops 0 — 골든 지문 불변 게이트)
+  }
+
+  // 호버 스포트라이트 대상 판별(대칭). 반환 { cell, ym }:
+  //   - 단일 칸 호버(hoverCell·비묶음): cell = 그 칸(그 나무만 선명), ym = null(모든 숲 페이드).
+  //   - 숲 호버(hoverForestYm): ym = 그 달(그 숲만 선명), cell = null(모든 낱개 나무 페이드).
+  //   호버 없거나 오버뷰/스냅샷 합성이면 null(스포트라이트 비활성 — 스냅샷 베이크에 안 새게).
+  _hoverSpotlight() {
+    if (this.camera.overview || this._snapComposite) return null;
+    const cell = (this.hoverCell && !this.hoverCell.bundled) ? this.hoverCell : null;
+    const ym = this.hoverForestYm || null;
+    if (!cell && !ym) return null;
+    return { cell, ym };
   }
 
   // 정적 바닥 캐시 키 — 같으면 재베이크 0(같은 캔버스 blit). 내용·줌·백버퍼·지평선·차단·정적 출력에
