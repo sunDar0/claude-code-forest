@@ -50,16 +50,43 @@ export class Camera {
   }
 
   /**
+   * 줌 사다리: 줌아웃 방향으로 완만한 분수 단계(0.7·0.5)를 정수 [zoomMin..zoomMax] 앞에 끼운다.
+   * 분수 단계는 "내 나무 다 보임(zoomMin=1)" 과 "전체맵 오버뷰" 사이 급점프를 완화한다.
+   *   0.5 최저는 최소창에서 백버퍼 ~1.37M px 로 LOD 임계(1.5M) 밑이라 성능 감당 가능(그보다 더
+   *   줌아웃한 전체맵은 오버뷰 스냅샷이 담당). 분수 단계는 zoomMin==1(콘텐츠가 뷰포트를 채움)일 때만
+   *   — 콘텐츠가 작아 zoomMin>1 이면 기존대로 zoomMin→오버뷰.
+   * @returns {number[]} 오름차순 줌 값 사다리
+   */
+  _zoomLadder() {
+    const steps = [];
+    if (this.zoomMin <= 1) steps.push(0.5, 0.7);
+    for (let z = Math.max(1, this.zoomMin); z <= this.zoomMax; z++) steps.push(z);
+    return steps;
+  }
+
+  /** 현재 줌과 가장 가까운 사다리 인덱스. @param {number[]} ladder @param {number} zoom @returns {number} */
+  _ladderIndex(ladder, zoom) {
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < ladder.length; i++) {
+      const d = Math.abs(ladder[i] - zoom);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  /**
    * 휠 줌(커서 기준). 커서 아래 월드 지점이 줌 전후 화면 같은 자리에 오게 한다(재중심 안 함).
-   * zoom=zoomMin 에서 추가 줌아웃하면 오버뷰(맵 전체) 진입, 오버뷰에서 줌인하면 zoomMin 으로 복귀.
+   * 줌 사다리(_zoomLadder)의 인접 인덱스로 이동. 사다리 최저에서 추가 줌아웃하면 오버뷰(맵 전체)
+   * 진입, 오버뷰에서 줌인하면 사다리 최저(분수 단계 있으면 0.5)로 복귀.
    * @param {number} cx 캔버스 px x
    * @param {number} cy 캔버스 px y
    * @param {number} dir +1 줌인 / -1 줌아웃
    */
   zoomAt(cx, cy, dir) {
+    const ladder = this._zoomLadder();
     if (this.overview) {
       if (dir < 0) return; // 오버뷰가 줌아웃 끝
-      // 오버뷰 → zoomMin 정수 줌. 복귀 시 커서 아래 월드 지점을 커서 위치에 유지(피벗 일관).
+      // 오버뷰 → 사다리 최저(분수 단계). 복귀 시 커서 아래 월드 지점을 커서 위치에 유지(피벗 일관).
       const snap = this.host._mapSnapshot;
       // 오버뷰 캔버스에서 맵은 하단 정렬(위는 하늘 밴드) — _renderOverview 가 mapTop=캔버스높이-snapH
       //   부터 스냅샷을 그린다. 그래서 커서 y → 스냅샷 y 역변환에 이 상단 오프셋(mapTop)을 빼야 한다.
@@ -67,7 +94,7 @@ export class Camera {
       //   바꾸기 전 오버뷰 값(= viewport 높이)으로 잡는다.
       const overviewH = Math.max(CELL_SPAN, this.host._viewport().h);
       this.overview = false;
-      this.cam.zoom = this.zoomMin;
+      this.cam.zoom = ladder[0];
       this.host._recompute();
       if (snap) {
         const mapTop = overviewH - snap.snapH;
@@ -80,13 +107,16 @@ export class Camera {
       return;
     }
     const oldZoom = this.cam.zoom;
-    // zoomMin 에서 추가 줌아웃 → 오버뷰 진입. 직전 완성 스냅샷이 있으면 유지(여기서 무효화 안 함).
-    if (dir < 0 && oldZoom <= this.zoomMin) {
+    const idx = this._ladderIndex(ladder, oldZoom);
+    const nextIdx = idx + dir; // dir>0 줌인(인덱스 증가), dir<0 줌아웃(감소)
+    // 사다리 최저에서 추가 줌아웃 → 오버뷰 진입. 직전 완성 스냅샷이 있으면 유지(여기서 무효화 안 함).
+    if (nextIdx < 0) {
       this.overview = true;
       this.host._recompute();
       return;
     }
-    const next = Math.max(this.zoomMin, Math.min(this.zoomMax, oldZoom + dir));
+    if (nextIdx > ladder.length - 1) return; // 줌인 끝
+    const next = ladder[nextIdx];
     if (next === oldZoom) return;
     // 줌 전 커서 아래 월드 좌표.
     const worldX = this.cam.x + cx / oldZoom;
@@ -105,6 +135,9 @@ export class Camera {
    * @param {number} dy 화면 px 이동량 y
    */
   pan(dx, dy) {
+    // 오버뷰(맵 전체 조망)는 스냅샷만 그리고 cam 을 안 쓴다 — 팬은 무의미(전체맵이라 이동할 여백 없음).
+    //   여기서 막지 않으면 cam.x/y 만 움직여 미니맵 뷰포트 사각이 본체와 무관하게 드리프트한다.
+    if (this.overview) return;
     this.cam.x -= dx / this.cam.zoom;
     this.cam.y -= dy / this.cam.zoom;
     this._clampPan();

@@ -327,7 +327,9 @@ export class ForestRenderer {
       this._layoutCanvas();
       return;
     }
-    const zoom = Math.max(1, this.camera.cam.zoom | 0);
+    // 분수 줌아웃(0.5·0.7 사다리) 허용 — 정수 절삭(| 0) 금지. zoom<1 이면 백버퍼가 ceil(vp/zoom)로
+    //   팽창하나(0.5 → 최소창에서 ~1.37M px, LOD 임계 1.5M 밑) 감당 범위. 양수 가드만 둔다.
+    const zoom = this.camera.cam.zoom > 0 ? this.camera.cam.zoom : 1;
     this.camera.cam.zoom = zoom;
     // 종횡비 무관. 백버퍼 = ceil(뷰포트/zoom), 최소 1그리드(어느 축이든 안 잘리게).
     this.bufW = Math.max(CELL_SPAN, Math.ceil(vp.w / zoom));
@@ -335,8 +337,9 @@ export class ForestRenderer {
     this.buffer.width = this.bufW;
     this.buffer.height = this.bufH;
     this.bctx.imageSmoothingEnabled = false;
-    this.canvas.width = this.bufW * zoom;
-    this.canvas.height = this.bufH * zoom;
+    // 캔버스 intrinsic = 백버퍼×zoom. 정수 줌이면 정확, 분수 줌이면 반올림(화면 표시는 _layoutCanvas 가 vp 로 강제).
+    this.canvas.width = Math.round(this.bufW * zoom);
+    this.canvas.height = Math.round(this.bufH * zoom);
     this.ctx.imageSmoothingEnabled = false;
     this.skyH = Math.round(this.bufH * 0.17);
     this.scale = zoom; // 하위호환(HUD 가 scale 참조)
@@ -3219,13 +3222,20 @@ export class ForestRenderer {
     }
 
     // 뷰포트 사각(현재 카메라가 보는 범위, 하늘 포함). 흰 테두리.
-    const vx = mapX(this.camera.cam.x);
-    const vy = mapY(this.camera.cam.y);
-    const vw = Math.max(2, this.bufW * s);
-    const vh = Math.max(2, this.bufH * s);
-    // 미니맵 박스(0..mw, 0..mh) 안으로 클램프(테두리만 보이게). 하늘 쪽(y<landTop)도 허용.
-    const cx0 = Math.max(0, vx), cy0 = Math.max(0, vy);
-    const cx1 = Math.min(mw, vx + vw), cy1 = Math.min(mh, vy + vh);
+    //   오버뷰는 맵 전체가 보이는 상태 — cam 이 아니라 미니맵 전체(0..mw, 0..mh)를 사각으로.
+    //   (오버뷰에선 render 가 cam 을 안 쓰고 스냅샷만 그리므로 cam 기반 사각은 부정확·드리프트.)
+    let cx0, cy0, cx1, cy1;
+    if (this.camera.overview) {
+      cx0 = 0; cy0 = 0; cx1 = mw; cy1 = mh;
+    } else {
+      const vx = mapX(this.camera.cam.x);
+      const vy = mapY(this.camera.cam.y);
+      const vw = Math.max(2, this.bufW * s);
+      const vh = Math.max(2, this.bufH * s);
+      // 미니맵 박스(0..mw, 0..mh) 안으로 클램프(테두리만 보이게). 하늘 쪽(y<landTop)도 허용.
+      cx0 = Math.max(0, vx); cy0 = Math.max(0, vy);
+      cx1 = Math.min(mw, vx + vw); cy1 = Math.min(mh, vy + vh);
+    }
     mctx.strokeStyle = "rgba(255, 255, 255, 0.92)";
     mctx.lineWidth = 1;
     mctx.strokeRect(Math.round(cx0) + 0.5, Math.round(cy0) + 0.5, Math.max(1, Math.round(cx1 - cx0)), Math.max(1, Math.round(cy1 - cy0)));

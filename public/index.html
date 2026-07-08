@@ -509,7 +509,7 @@
       background: rgba(24, 16, 10, 0.96);
       border: 2px solid rgba(150, 110, 65, 1);
       color: #f0ead8;
-      padding: 16px 22px;
+      padding: 12px 22px;
       font-size: 14px;
       line-height: 1.4;
       border-radius: 5px;
@@ -518,7 +518,8 @@
       /* 패널 위 클릭은 닫힘 트리거 안 함 */
       min-width: 320px;
       max-width: 440px;
-      max-height: 82vh;
+      /* top(56)+하단여백(16) 을 뺀 가용 높이. 최소창(470)에서 스크롤 없이 성목 상세가 다 보이게. */
+      max-height: calc(100vh - 72px);
       overflow-y: auto;
       box-shadow: 0 6px 26px rgba(0, 0, 0, 0.55);
       z-index: 20;
@@ -528,11 +529,11 @@
     #detail .detail-preview {
       display: flex;
       justify-content: center;
-      margin: 0 0 10px;
+      margin: 0 0 6px;
     }
     #detail .detail-preview img {
-      width: 128px;
-      height: 128px;
+      width: 64px;
+      height: 64px;
       image-rendering: pixelated;
       border-radius: 6px;
       background: rgba(0, 0, 0, .15);
@@ -549,14 +550,14 @@
     #detail .subtitle {
       color: #c8b58e;
       font-size: 12px;
-      margin-bottom: 10px;
+      margin-bottom: 6px;
     }
 
     #detail .drow {
       display: flex;
       justify-content: space-between;
       gap: 18px;
-      padding: 2px 0;
+      padding: 1px 0;
     }
 
     #detail .drow .k {
@@ -573,7 +574,7 @@
       font-size: 11px;
       letter-spacing: 0.06em;
       text-transform: uppercase;
-      margin: 10px 0 3px;
+      margin: 6px 0 2px;
     }
 
     /* 그날 값의 평균 대비 침엽수 뱃지(inline SVG). 텍스트 끝에 작게 정렬. */
@@ -594,7 +595,7 @@
     #detail .hint {
       color: #8a7c66;
       font-size: 11px;
-      margin-top: 10px;
+      margin-top: 6px;
     }
 
     /* 상태 표식 */
