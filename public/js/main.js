@@ -201,9 +201,9 @@ async function boot() {
    */
   function refreshPlantUI() {
     const map = lastMeta.placementMap || {};
-    // 차단 집합 1회 계산(닫힘 칸). 펼친 달은 차단 해제(drilldown).
+    // 차단 집합 1회 계산(닫힘 칸). 드릴다운 폐기 → 항상 전 묶인 달 기준.
     //   활성화 UI 와 무관하게 항상 계산해 렌더가 바위/절벽을 그릴 수 있게 한다(단일 진실 소스).
-    blocked = blockedSet(map, lastMeta.forests, renderer.isDrilldown());
+    blocked = blockedSet(map, lastMeta.forests, null);
     renderer.setBlocked(blocked);
     // 시작일 미정이면 모달 우선(실모드만 — read-only 목은 전체 스테이지라 해당 없음).
     const showModal = startUndecided() && !state.readOnly;
@@ -314,7 +314,7 @@ async function boot() {
         //   한 번 맞춰진 뒤로는 같은 toZoom 이라 줌 출렁임 없이 위치(팬)만 따라간다. 입력 차단과 무관.
         renderer.focusLastActive(AUTO_FOLLOW_CELLS);
         // activate 가 재폴해 lastMeta 가 갱신됐다. blocked 도 새로 계산해 다음 칸 판정에 반영.
-        blocked = blockedSet(lastMeta.placementMap || {}, lastMeta.forests, renderer.isDrilldown());
+        blocked = blockedSet(lastMeta.placementMap || {}, lastMeta.forests, null);
       }
     } finally {
       autoPlanting = false;
@@ -501,12 +501,15 @@ async function boot() {
       }
       return;
     }
-    // 비드래그: 호버 히트테스트 → DOM 툴팁 갱신(셀 또는 묶인 숲).
+    // 비드래그: 호버 히트테스트 → DOM 툴팁 갱신. F2: 지난 달 나무 호버면 그 달 전체를 그룹
+    //   하일라이트(setHoverForest=그 달 ym), 현재 달 나무면 낱개(그 나무만). 툴팁은 항상 그날 정보
+    //   (드릴다운 폐기 → "펼치려면 클릭" 요약 없음).
     renderer.setPointer(p.x, p.y);
-    const fYm = renderer.hitTestForest(p.x, p.y);
-    renderer.setHover(renderer.hitTestCanvas(p.x, p.y));
-    renderer.setHoverForest(fYm); // 묶인 숲 호버 떠오름
-    ui.updateTooltip(renderer, e.clientX, e.clientY, fYm);
+    const hovered = renderer.hitTestCanvas(p.x, p.y);
+    renderer.setHover(hovered);
+    const fYm = hovered && hovered.bundled ? hovered.params.date.slice(0, 7) : null;
+    renderer.setHoverForest(fYm); // 지난 달 나무 → 그 달 전체 그룹 하일라이트
+    ui.updateTooltip(renderer, e.clientX, e.clientY, null);
     updateCursorGrid(p.x, p.y); // 커서 그리드 하이라이트
   });
 
@@ -547,16 +550,7 @@ async function boot() {
     if (moved) return;
     const p = toCanvasPx(e.clientX, e.clientY);
 
-    // 1) 묶인 숲 클릭 = 드릴다운 토글(펼침). 펼치면 그 달이 일 그리드로.
-    const fYm = renderer.hitTestForest(p.x, p.y);
-    if (fYm) {
-      renderer.setDrilldown(renderer.isDrilldown() === fYm ? null : fYm);
-      // 드릴다운 변경 → 마지막 스냅샷으로 즉시 재렌더(숨김/표시 갱신).
-      state.onUpdate(state.cellList, null, lastMeta);
-      return;
-    }
-
-    // 2) 심긴/데이터 그리드 클릭 = 상세 패널 토글.
+    // 1) 심긴/데이터 그리드 클릭 = 상세 패널 토글(F3: 지난 달 나무도 낱개라 바로 그날 상세 1단계).
     const cell = renderer.hitTestCanvas(p.x, p.y);
     if (cell) {
       renderer.toggleSelected(cell);
@@ -565,7 +559,7 @@ async function boot() {
       return;
     }
 
-    // 3) 빈칸 클릭: 활성화 가능한 후보 칸이면 클릭 한 번에 바로 심기 확인 팝업.
+    // 2) 빈칸 클릭: 활성화 가능한 후보 칸이면 클릭 한 번에 바로 심기 확인 팝업.
     //    pendingSlot 은 확인 동안만 보관. 콜드=빈 칸 아무 데나, 점유 1+=8방향만.
     //    startDate 미정이면 모달이 먼저(canActivate=false).
     const map = lastMeta.placementMap || {};
@@ -634,15 +628,10 @@ async function boot() {
         pendingSlot = null;
         return;
       }
-      // 모달(상세) > 드릴다운: 모달 열려 있으면 모달만 닫고 드릴다운은 건드리지 않는다.
+      // 상세 모달 열려 있으면 닫는다(드릴다운 폐기 — 더 닫을 계층 없음).
       if (ui.isDetailOpen()) {
         renderer.setSelected(null);
         ui.updateDetail(renderer);
-        return;
-      }
-      if (renderer.isDrilldown()) {
-        renderer.setDrilldown(null);
-        state.onUpdate(state.cellList, null, lastMeta);
         return;
       }
       return;

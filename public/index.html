@@ -503,7 +503,7 @@
     /* 클릭 상세 패널(중앙 상단). §56: 데스크탑 기준 크게(읽기 편하게). */
     #detail {
       position: fixed;
-      top: 56px;
+      top: 40px;
       left: 50%;
       transform: translateX(-50%);
       background: rgba(24, 16, 10, 0.96);
@@ -518,8 +518,8 @@
       /* 패널 위 클릭은 닫힘 트리거 안 함 */
       min-width: 320px;
       max-width: 440px;
-      /* top(56)+하단여백(16) 을 뺀 가용 높이. 최소창(470)에서 스크롤 없이 성목 상세가 다 보이게. */
-      max-height: calc(100vh - 72px);
+      /* top(40)+하단여백(16) 을 뺀 가용 높이. 최소창(470)에서 스크롤 없이 성목 상세가 다 보이게. */
+      max-height: calc(100vh - 56px);
       overflow-y: auto;
       box-shadow: 0 6px 26px rgba(0, 0, 0, 0.55);
       z-index: 20;

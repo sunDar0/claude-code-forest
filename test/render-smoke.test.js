@@ -137,10 +137,10 @@ test("렌더 스모크: 골든 지문 일치(회귀 가드)", async () => {
   );
 });
 
-// 회귀 가드(오버뷰 스냅샷 — 전부 empty 인 묶인 달): 그루 0 인 묶인 달은 _forestSprite=null 이라
-//   스프라이트가 안 생긴다. _snapAllBaked 가 그 부재를 미완성으로 오판하면 합성에 영영 못 가
-//   임시본(균일 초록 + 숲 bbox 사각)이 고정 노출된다(실 data 4월=전부 empty 회귀). 그루 0 군집을
-//   "구울 게 없음=완성"으로 건너뛰어야 합성이 도달한다.
+// 회귀 가드(오버뷰 스냅샷 — 전부 empty 인 묶인 달): F1 이후 묶인 달도 낱개 셀 나무라, 전부 empty 인
+//   달은 그릴 나무가 0 이다(EMPTY 스킵). (나) 직접그리기 합성은 캐시 게이트 없이 무효화당 1회 합성해
+//   임시본 고정 회귀 자체가 구조적으로 불가능하다. 그래도 합성 도달·임시본 잔재 없음을 가드로 남긴다.
+//   바닥은 ground 패스가 bundledFootprint 로 PAST 풀톤을 깐다.
 test("오버뷰 스냅샷: 전부 empty 인 묶인 달이 있어도 합성 도달(임시본 고정 안 됨)", async () => {
   const g = installGlobals(1);
   try {
@@ -170,12 +170,14 @@ test("오버뷰 스냅샷: 전부 empty 인 묶인 달이 있어도 합성 도�
     const cellList = days.map((d) => forestCellParams(d, CAP, REF_MAX));
     r.setData(cellList, null, placement);
 
-    // 4월 군집은 그루 0·bbox 존재.
+    // 4월 발자국(closedCells·bbox) 존재. F1: 나무 인스턴스는 없다(낱개 셀 렌더).
     const april = r.forestTrees.get("2026-04");
     assert.ok(april && april.bbox, "4월 군집 bbox 존재");
-    assert.equal(april.instances.length, 0, "4월은 전부 empty → 그루 0");
+    assert.equal(april.instances, undefined, "F1: 군집 나무 인스턴스 폐기");
+    assert.ok(april.members.length >= 9, "4월 발자국(멤버 셀) 보존");
 
-    // 오버뷰 합성을 끝까지 돌린다(예전엔 영영 false 라 무한 임시본).
+    // 오버뷰 합성을 끝까지 돌린다(예전엔 영영 false 라 무한 임시본). 콜드 첫 프레임은 간이 임시본,
+    //   다음 프레임에 합성(원샷 direct-draw defer) → 2프레임 내 도달.
     r.camera.cam = { x: 0, y: 0, zoom: r.camera.zoomMin || 0.0278 };
     r.camera.overview = true;
     let composited = false;
@@ -184,12 +186,13 @@ test("오버뷰 스냅샷: 전부 empty 인 묶인 달이 있어도 합성 도�
       if (r._mapSnapshot && !r._mapSnapshotStale) { composited = true; break; }
     }
     assert.ok(composited, "전부 empty 묶인 달이 있어도 합성 도달해야 함(임시본 고정 회귀)");
-    assert.ok(r._snapAllBaked(), "_snapAllBaked 가 그루 0 군집을 완성으로 봐야 함");
 
-    // 합성 스냅샷에 임시본 사각(rgba(60,110,55..))이 없어야 한다(균일 초록 아님).
+    // 합성 스냅샷에 임시본 사각(rgba(60,110,55..))이 없어야 한다(균일 초록 아님). 콜드 리셋 후 첫 콜은
+    //   임시본(defer)이므로 그 다음 콜(합성)의 ops 만 검사한다.
     r._mapSnapshot = null; r._mapSnapshotStale = false; r._snapProvisional = null; r._snapBuilder = null;
+    r._advanceMapSnapshot(); // 콜드 1프레임: 간이 임시본
     resetOps();
-    r._advanceMapSnapshot();
+    r._advanceMapSnapshot(); // 합성
     const ops = getOps();
     assert.ok(!ops.some((o) => o.includes("rgba(60,110,55")), "합성에 임시본 숲 사각이 없어야 함");
     // 흙(pendDirt) 다수 + 4월 footprint=PAST 풀톤이 둘 다 등장(라이브 지형 반영).

@@ -95,15 +95,18 @@ export class ForestRenderer {
     this.cellByKey = new Map(); // "gx,gy" → cell (데이터 타일 빠른 조회)
 
     // 숲 계층(월 단위 묶음).
+    //   F1(§덩어리 폐기): 묶인 달도 낱개 나무(밑동 y 개별 Y-sort)로 그린다. "묶기"는 그룹 소속·자리
+    //   압축·바닥(forest 톤)에만 남고, 달 1장 스프라이트(덩어리) 렌더는 제거됐다. 덩어리가 없으니
+    //   펼치기(drilldown)도 폐기 — 아무 나무나 바로 클릭 = 그날 상세(F3).
     this.forests = {}; // ym → { month, bundled, bundledAt, monthly }
-    this.drilldownMonth = null; // 펼친(드릴다운) 달 "YYYY-MM" — 그 달은 일 그리드로 표시
-    this.forestBlobs = []; // 묶인 달의 숲 군집 [{ ym, cgx, cgy, r, density, trees, ... }]
+    this.forestBlobs = []; // 묶인 달의 숲 군집 [{ ym, cgx, cgy, members, density, ... }] — 바닥/나비/발자국용
     // 묶인 숲 닫힌 발자국(C·단위3): 모든 군집의 closedCells("gx,gy") 집합. 빈 셀·브리지 셀이
     //   cellByKey 에 없어도 바닥 종류를 "forest" 로 분류해 셀 사이 흙 구멍을 없앤다(연속 바닥).
     //   파생 렌더 상태일 뿐 — 베이크 키·_contentSignature·무효화와 무관(§28 프리즈 0).
     this.bundledFootprint = new Set();
-    // 숲 군집 캐시: ym → { instances, bbox, drawBBox, members, ... }.
-    //   buildForest + 그루별 buildTree 를 ym 단위로 1회 베이크(프레임마다 재생성 금지).
+    // 숲 군집 캐시: ym → { sig, bbox, members }.
+    //   F1: 나무 인스턴스·달 스프라이트 베이크는 폐기. buildForest 는 이제 닫힌 발자국(closedCells,
+    //   코너 브리지 포함)과 bbox 만 얻는 용도 — 바닥 연속(흙 구멍 0)·나비 컬링용.
     this.forestTrees = new Map();
 
     // 나무 스프라이트 베이크 캐시: key → {canvas, ax, ay}(ax/ay = 밑동의 스프라이트 내 픽셀 오프셋).
@@ -114,17 +117,10 @@ export class ForestRenderer {
     this.spriteCap = 256;
     this._spriteBakes = 0; // 스모크용 베이크 카운터(같은 key 2프레임 → 1회만 베이크 검증)
 
-    // 군집(달) 단위 스프라이트: 묶인 달 나무 수십~수백 그루를 달 1장에 합쳐 베이크한다(그루당 1장이면
-    //   스프라이트 수가 LRU 상한을 넘겨 매 프레임 축출·재베이크 스래시 → 행). 캐시 키 = ym.
-    //   {canvas, rx, ry, wx0, wy0}: rx/ry = 군집 기준점의 스프라이트 내 픽셀 오프셋.
-    this.forestSprites = new Map();
-    this._forestBakes = 0; // 스모크 카운터(달 스프라이트 완성 수)
-
     // 비차단 렌더용 베이크 예산: 한 프레임에 너무 많이 베이크해 멈칫하지 않게 분산한다.
-    //   _frameBakeBudget = 프레임당 진행할 "베이크 작업" 수(셀 나무 1콜 또는 군집 청크 1개),
-    //   _instBakeBudget = 군집 청크당 그루 수. 둘의 곱이 프레임당 픽셀 작업 상한 → 단일 프레임 < 100ms.
+    //   _frameBakeBudget = 프레임당 새로 구울 셀 나무 스프라이트 수(콜드/줌 진입 분산). 초과분은
+    //   다음 프레임에 채운다.
     this._frameBakeBudget = 2;
-    this._instBakeBudget = 10;
     this._bakesThisFrame = 0;
 
     // 정적 바닥 캐시(교정 A): 베이스 흙·풀결·전이대·빈땅 흙을 오프스크린에 1회 베이크 → 매 프레임 blit.
@@ -202,7 +198,6 @@ export class ForestRenderer {
     sheet.onReady(() => {
       // 시트 준비 → 절차 베이크 전량 무효화(다음 프레임부터 시트로 재베이크). 데이터·카메라 불변.
       this.spriteCache.clear();
-      this.forestSprites.clear();
       this._invalidateSnapshot();
     });
 
@@ -383,9 +378,7 @@ export class ForestRenderer {
   }
 
   /**
-   * 콘텐츠 월드 px 바운딩 박스. 개별 그리드 + 묶인 숲 군집 전부 포함.
-   * 숲 군집은 멤버 셀 발자국 위로 나무 키만큼 솟으므로 그 extent(drawBBox)를 합산해야 줌아웃
-   * 끝에서 군집 상단이 안 잘린다.
+   * 콘텐츠 월드 px 바운딩 박스. 개별 그리드 + 묶인 숲 발자국(브리지 포함) 전부 포함.
    * @returns {{x0,x1,y0,y1}}
    */
   _contentWorldBounds() {
@@ -400,11 +393,11 @@ export class ForestRenderer {
       y0 = Math.min(y0, cy - pad); y1 = Math.max(y1, cy + pad);
       any = true;
     }
-    // 묶인 숲 군집 extent. drawBBox(그릴 사각 합집합) 우선 — 베이크/컬링과 동일 기준이라 줌아웃 끝 잘림 0.
+    // 묶인 숲 발자국 extent(브리지 셀 포함 — this.cells 엔 없는 코너 브리지까지 덮음).
     for (const fb of this.forestBlobs) {
       const cluster = this.forestTrees.get(fb.ym);
-      if (cluster && (cluster.drawBBox || cluster.bbox)) {
-        const bb = cluster.drawBBox || cluster.bbox;
+      if (cluster && cluster.bbox) {
+        const bb = cluster.bbox;
         x0 = Math.min(x0, bb.x0); x1 = Math.max(x1, bb.x1);
         y0 = Math.min(y0, bb.y0); y1 = Math.max(y1, bb.y1);
       } else {
@@ -529,7 +522,8 @@ export class ForestRenderer {
 
   // 커서(캔버스 px) 아래 나무 — 스프라이트 그릴 사각(_drawTree 동일 식)에 커서가 든 나무의 base 셀.
   //   성목 수관(밑동 칸 위로 솟은 잎)을 호버해도 그 나무를 잡는다(그리드 칸 조회는 밑동 칸만 맞춰
-  //   수관을 놓침). 여럿이면 가장 앞(큰 baseY=아래) 우선. 묶인 셀·빈땅·overview 제외. 화면 밖 컬링.
+  //   수관을 놓침). 여럿이면 가장 앞(큰 baseY=아래) 우선. 빈땅·overview 제외(F1: 묶인 달도 낱개
+  //   나무라 히트 대상). 화면 밖 컬링.
   _treeAtCanvas(cx, cy) {
     if (this.camera.overview) return null;
     const zoom = this.camera.cam.zoom || 1;
@@ -538,7 +532,7 @@ export class ForestRenderer {
     const oy = Math.round(this.worldOriginY - this.camera.cam.y);
     let best = null, bestY = -Infinity;
     for (const cell of this.cells) {
-      if (cell.bundled || cell.params.stage === STAGE.EMPTY) continue;
+      if (cell.params.stage === STAGE.EMPTY) continue;
       const sc = gridToScreen(cell.gx, cell.gy, ox, oy);
       const off = cell.placement ? cell.placement.offsetTiles : { x: 0, y: 0 };
       const sx = (sc.x + off.x * TILE) | 0;
@@ -720,7 +714,6 @@ export class ForestRenderer {
    */
   _contentSignature(cellList, placementMap) {
     const parts = [];
-    parts.push("dd:" + (this.drilldownMonth || ""));
     // 배치(활성 날짜→그리드 좌표). 키 정렬로 안정.
     const pk = Object.keys(placementMap).sort();
     for (const d of pk) parts.push("p:" + d + "=" + placementMap[d].gx + "," + placementMap[d].gy);
@@ -765,11 +758,12 @@ export class ForestRenderer {
     this.empty = Object.keys(map).length === 0;
     this.cells = layoutByPlacements(cellList, map);
 
-    // 숲 계층: 묶인 달이고 펼침(drilldown) 아닌 셀은 개별 나무 대신 숲 한 덩어리로 시각 교체.
+    // 숲 계층: 묶인 달 셀에 그룹 소속 플래그만 단다(F1). 렌더는 이번 달과 동일하게 낱개 나무 —
+    //   bundled 는 "그룹 하일라이트(F2)·바닥 forest 톤·자리 압축 소속"에만 쓰이고 덩어리로 안 바뀐다.
     for (const cell of this.cells) {
       const ym = cell.params.date.slice(0, 7);
       const f = this.forests[ym];
-      cell.bundled = !!(f && f.bundled) && this.drilldownMonth !== ym;
+      cell.bundled = !!(f && f.bundled);
     }
 
     this.cellByKey.clear();
@@ -806,6 +800,10 @@ export class ForestRenderer {
     this._computeForestBlobs(); // 묶인 달 → 숲 실루엣(나무 수·총사용량으로 크기/밀도)
     this._computeHorizon(); // 월드 북쪽 지평선(나무가 하늘에 안 뜨게)
 
+    // 스프라이트 상한: 256 고정. 오버뷰 스냅샷 합성은 이제 캐시 우회 직접그리기(_bakeTreeSprite)라
+    //   맵 전체 나무를 캐시에 동시 보유하지 않는다 → 상한을 데이터 크기에 비례해 키울 이유가 없다.
+    //   정상 화면은 화면 밖 컬링으로 작업집합이 수십 칸이라 256 안에 든다(F1 이전 원복).
+
     // 카메라: 셀이 늘면 줌 한계 갱신·zoom 클램프. 첫 데이터 1회만 콘텐츠 중심으로 배치.
     //   이후 폴링/활성화는 카메라를 끌어오지 않는다.
     this.camera._updateZoomLimits();
@@ -840,27 +838,15 @@ export class ForestRenderer {
   setForests(forestsMap) {
     this.forests = forestsMap || {};
   }
-  /** 드릴다운: 묶인 달을 일 그리드로 펼침(null=펼침 없음). @param {string|null} ym */
-  setDrilldown(ym) {
-    this.drilldownMonth = ym || null;
-  }
-  /** @returns {string|null} 현재 드릴다운 중인 달 ym */
-  isDrilldown() {
-    return this.drilldownMonth;
-  }
 
-  /**
-   * 묶인(펼침 아닌) 달마다 숲 군집(blob)을 산출. 멤버 셀(그리드) 좌표 목록을 보존해 나무를 각 멤버
-   * 셀의 실제 그리드 영역에 심으므로 군집 모양 = 그리드 묶음 모양(드릴다운 전후 위치 자동 일치).
-   */
   /**
    * 단위4 식생 트윅 적용(디버그 슬라이더 전용). VEG_TWEAKS 키 1개를 갱신하고, 필요한 재계산만 한다.
    *   - 일반 폴 무영향: 이 메서드는 슬라이더 드래그(명시적 트윅) 시에만 호출된다. _contentSignature·setData
    *     시그니처에는 VEG_TWEAKS 가 안 들어가므로 같은 내용 폴 → 재베이크 0·무효화 0(§28 프리즈 0).
    *   - shadow·grass: 바닥 라이브 패스라 다음 프레임 자동 반영. 재계산 불필요.
    *   - boundaryNoise: 경계도 라이브 ground 패스라 자동 반영. (둘 다 오버뷰 스냅샷엔 구워져 있어 무효화.)
-   *   - forestDensityCoef: 군집 density 가 바뀌므로 _computeForestBlobs 재실행 → density 시그니처 변경 →
-   *     _computeForestClusters 가 그 달 forestSprites/forestTrees 무효화·재베이크.
+   *   - forestDensityCoef: 군집 density(_computeForestBlobs) 재산출. F1 이후 낱개 나무 렌더엔 시각
+   *     영향이 없지만(덩어리 폐기) blob.density 파생값은 갱신된다.
    * @param {string} key VEG_TWEAKS 키
    * @param {number} val 새 값
    */
@@ -868,8 +854,7 @@ export class ForestRenderer {
     if (!Object.prototype.hasOwnProperty.call(VEG_TWEAKS, key)) return;
     VEG_TWEAKS[key] = val;
     if (key === "forestDensityCoef") {
-      // 군집 밀도 재산출 → sig 변경 → 군집 스프라이트 재베이크(명시적 트윅이라 §28 예외).
-      this._computeForestBlobs();
+      this._computeForestBlobs(); // blob.density 파생값 재산출(렌더 무영향).
     }
     // 바닥·경계·숲은 오버뷰 스냅샷에 구워져 있으므로 무효화(다음 합성에서 새 트윅 반영, 이중버퍼로 플래시 0).
     this._invalidateSnapshot();
@@ -916,26 +901,21 @@ export class ForestRenderer {
     this._computeForestClusters(blobs);
   }
 
-  // 숲 = 멤버 셀 좌표 기반 나무 군집: 각 묶인 달마다 멤버 셀들의 실제 그리드 영역 안에
-  //   나무를 심고(ym+셀좌표 시드, 화면 무관), 그루별 buildTree 결과를 ym 단위로 캐시(프레임마다
-  //   재생성 금지). 좌표는 월드 px 절대값 → 카메라 팬에도 안 흔들림.
+  // 숲 = 멤버 셀 좌표 기반 닫힌 발자국(F1): 나무는 낱개 셀로 그리므로(§tree push) 여기선 나무를
+  //   베이크하지 않는다. buildForest 는 오직 closedCells(멤버 + 코너 브리지)와 bbox 를 얻는 용도 —
+  //   바닥 연속(흙 구멍 0)·나비 컬링용. 좌표는 월드 px 절대값 → 카메라 팬에 안 흔들림.
   _computeForestClusters(blobs) {
     const live = new Set(blobs.map((fb) => fb.ym));
-    // 사라진 달(드릴다운·언번들) 캐시 제거 + 그 달 군집 스프라이트도 무효화.
+    // 사라진 달(언번들) 캐시 제거.
     for (const ym of [...this.forestTrees.keys()]) {
-      if (!live.has(ym)) {
-        this.forestSprites.delete(ym);
-        this.forestTrees.delete(ym);
-      }
+      if (!live.has(ym)) this.forestTrees.delete(ym);
     }
     for (const fb of blobs) {
-      // 캐시 키 = ym + 멤버 셀 집합 + 밀도. 멤버/밀도 바뀌면 재베이크.
+      // 캐시 키 = ym + 멤버 셀 집합 + 밀도(브리지 형태에 stage 가 영향 → memSig 에 포함).
       const memSig = fb.members.map((m) => m.gx + "," + m.gy + ":" + m.stage).join(";");
       const sig = `${memSig}|${fb.density.toFixed(3)}`;
       const cached = this.forestTrees.get(fb.ym);
       if (cached && cached.sig === sig) continue;
-      // 멤버/밀도 변화 → 이전 달 스프라이트 무효화(명시 제거로 stale 캔버스 즉시 GC 대상화).
-      this.forestSprites.delete(fb.ym);
       const forest = buildForest({
         ym: fb.ym,
         cells: fb.members,
@@ -943,50 +923,19 @@ export class ForestRenderer {
         originX: this.worldOriginX,
         originY: this.worldOriginY,
       });
-      // 그루별 나무 형태 베이크(결정적 seed). 작은 스케일이라 가볍다.
-      for (const inst of forest.instances) {
-        const params = {
-          sim: {
-            maxHeight: 30 + fb.density * 30,
-            resourceCount: 14,
-            leafSize: 1.0 + fb.density * 1.2,
-            leafCount: 3,
-            baseThickness: 0.8 + fb.density * 1.2,
-            distribution: "uniform",
-            lightSensitivity: 0.4,
-          },
-          norms: { outputN: 0.35 + fb.density * 0.3 },
-          stage: inst.stage,
-          seed: inst.seed,
-          date: inst.seed,
-        };
-        const placement = gridPlacement(inst.seed, inst.stage);
-        inst.baked = buildTree(params, inst.scale, Infinity, placement);
-      }
-      // 베이크 캔버스 bounds = 그루 실제 그릴 사각 합집합(∪ 바닥 ∪ 풀잎 결). 군집 외곽 나무 세로
-      //   직선 잘림 방지를 위해 forest.bbox(footprint) 대신 drawBBox/drawUp/drawDown 으로 정합.
-      //   바닥·bounds 는 닫힌 발자국(closedCells = 멤버 + 브리지)으로 — 코너 갭이 메워져 한 덩어리.
+      // closedCells = 멤버 + 코너 브리지(형태적으로 닫힌 발자국) — 바닥 연속(흙 구멍 0)에 씀.
       const floorCells = forest.closedCells || fb.members;
-      const draw = this._computeClusterDrawBounds(forest, floorCells);
       this.forestTrees.set(fb.ym, {
         sig,
-        instances: forest.instances,
-        bbox: forest.bbox,
-        up: forest.up,
-        down: forest.down,
-        // 그릴 사각 합집합 기준(베이크·extent·컬링 공통).
-        drawBBox: draw.drawBBox,
-        drawUp: draw.drawUp,
-        drawDown: draw.drawDown,
-        members: floorCells, // 군집 바닥(닫힌 셀 발자국)용
+        bbox: forest.bbox, // 나비 컬링·임시 스냅샷 위치 표시용
+        members: floorCells, // 군집 바닥(닫힌 셀 발자국)·그룹 하일라이트용
       });
     }
     // C: 모든 살아있는 군집의 닫힌 발자국(closedCells)을 한 집합에 모은다. 캐시가 증분(미변경 달은
-    //   continue)이라도 매번 전 군집을 순회해 재구성한다 — 드릴다운/언번들로 사라진 달이 빠져야 한다.
+    //   continue)이라도 매번 전 군집을 순회해 재구성한다 — 언번들로 사라진 달이 빠져야 한다.
     //   순수 파생(렌더용)이라 베이크·무효화와 무관.
     this.bundledFootprint = new Set();
-    for (const [ym, ft] of this.forestTrees) {
-      if (this.drilldownMonth === ym) continue; // 펼친 달은 일 그리드로 — 숲 바닥 아님
+    for (const [, ft] of this.forestTrees) {
       for (const m of ft.members || []) this.bundledFootprint.add(m.gx + "," + m.gy);
     }
   }
@@ -1049,7 +998,7 @@ export class ForestRenderer {
     for (const fb of this.forestBlobs) {
       const cluster = this.forestTrees.get(fb.ym);
       if (!cluster || !cluster.bbox) continue;
-      const bb = cluster.drawBBox || cluster.bbox;
+      const bb = cluster.bbox;
       const sx0 = ox + (bb.x0 - this.worldOriginX);
       const sx1 = ox + (bb.x1 - this.worldOriginX);
       const sy0 = oy + (bb.y0 - this.worldOriginY);
@@ -1234,12 +1183,13 @@ export class ForestRenderer {
     return this._advanceMapSnapshot();
   }
 
-  // 한 프레임치 스냅샷 베이크 전진. 2단계로 비차단:
-  //   ① 워밍업 단계: 가시 군집·셀 나무 스프라이트를 프레임당 예산만큼 점진 베이크만 한다(풀해상
-  //      ground 패스 없음). 화면엔 직전 완성본 또는 간이 저해상 임시본으로 채워 빈 화면 방지.
-  //   ② 합성 단계: 모든 스프라이트가 준비되면(_snapAllBaked) 딱 한 번 풀 _drawGroundAndObjects
-  //      (캐시된 스프라이트만 blit) → 1회 다운스케일 → 확정.
-  //   풀맵 ground 패스를 빌드 내내 매 프레임 반복하던 것을 마지막 1프레임으로 옮긴다.
+  // 한 프레임치 스냅샷 전진 — (나) 캐시 우회 직접그리기 원샷 합성.
+  //   합성 패스(_snapComposite)는 나무를 spriteCache 에 넣지 않고 임시로 베이크→blit→폐기한다
+  //   (_drawTree→_bakeTreeSprite). 스프라이트 캐시가 총 나무 수에 비례하던 병목 제거: 캐시 메모리는
+  //   정상 화면 작업집합(수십 칸, 상한 256)에만 묶인다.
+  //   스톨 트레이드오프(옵션 a 원샷): 베이크+합성이 한 패스라 이 프레임 1회 스톨. 그동안 화면은
+  //   (직전 완성본 있으면) stale 완성본이, (콜드면) 첫 프레임 간이 임시본이 계속 나가 빈 화면이 안 된다.
+  //   합성은 무효화당 딱 1회만 실행되고, 끝나면 완성본을 캐시해 다음 프레임부터 blit 만 한다.
   _advanceMapSnapshot() {
     const vp = this._viewport();
     const m = this._mapWorldBounds();
@@ -1248,22 +1198,18 @@ export class ForestRenderer {
     const snapW = Math.max(1, Math.round(mapW * scale));
     const snapH = Math.max(1, Math.round(mapH * scale));
 
-    // ① 워밍업: 가시 스프라이트를 예산만큼 굽는다(풀맵 ground 패스 없이). 카메라 임시 변경 불필요.
-    this._bakesThisFrame = 0;
-    this._warmSnapshotSprites();
-    const allDone = this._snapAllBaked();
-
-    if (!allDone) {
-      // 이중 버퍼: 재합성이 끝나기 전엔 직전 완성본(stale)을 계속 표시한다(원자 교체 대기).
-      //   완성본이 아예 없을 때만(콜드 스타트) 저해상 임시본을 노출.
-      if (this._mapSnapshot) return this._mapSnapshot;
+    // 콜드(직전 완성본 없음): 첫 프레임은 간이 임시본만 내보내고 합성은 다음 프레임에 한다(진입 스톨을
+    //   빈 화면 없이 흘림). stale 완성본이 있으면(폴링 갱신) 이 블록을 건너뛰고 즉시 합성 — 그 사이
+    //   직전 완성본이 화면에 남아있다(동기 합성이라 브라우저가 블록 중 재도색 안 함). _snapProvisional
+    //   존재를 "임시본 이미 노출됨" 신호로 재사용해 별도 플래그를 안 둔다.
+    if (!this._mapSnapshot) {
       if (!this._snapProvisional || this._snapProvisional.snapW !== snapW) {
         this._snapProvisional = this._buildProvisionalSnapshot(m, snapW, snapH, scale);
+        return this._snapProvisional;
       }
-      return this._snapProvisional;
     }
 
-    // ② 합성(완성): 풀해상 1회 그리기 → 다운스케일. 가짜 카메라 + UI 강조 비움. 종료 후 복원.
+    // 합성(완성): 풀해상 1회 그리기 → 다운스케일. 가짜 카메라 + UI 강조 비움. 종료 후 복원.
     const tmp = document.createElement("canvas");
     tmp.width = mapW; tmp.height = mapH;
     const tctx = tmp.getContext("2d");
@@ -1285,8 +1231,7 @@ export class ForestRenderer {
     this.hoverSlot = null;
     this.bundleFx = null;
     this._forceDetail = true;
-    this._snapComposite = true; // 합성 LOD(결 텍스처·장식 생략, 나무/숲/흙 유지)
-    this._bakesThisFrame = 0; // 모든 스프라이트 캐시됨 → 이 패스는 blit 만(새 베이크 0)
+    this._snapComposite = true; // 합성 LOD(결 텍스처·장식 생략) + 나무 캐시 우회 직접그리기
     try {
       const hY = Math.round(this.worldHorizonY - this.camera.cam.y);
       this._drawGroundAndObjects(tctx, mapW, mapH, hY);
@@ -1315,40 +1260,6 @@ export class ForestRenderer {
     return snap;
   }
 
-  // 워밍업: 가시(맵 안 전부) 군집·셀 나무 스프라이트를 프레임당 예산만큼 점진 베이크.
-  //   풀맵 ground 패스 없이 스프라이트 캐시만 채운다(가벼움). 군집은 cluster.bbox 가 있으면 모두 대상.
-  _warmSnapshotSprites() {
-    // 군집 먼저(무거운 쪽). _forestSprite 가 청크 단위로 굽고 예산 소비.
-    for (const fb of this.forestBlobs) {
-      const cluster = this.forestTrees.get(fb.ym);
-      if (!cluster || !cluster.bbox) continue;
-      if (this._bakesThisFrame >= this._frameBakeBudget) return;
-      this._forestSprite(fb.ym, cluster);
-    }
-    // 셀 나무: 미캐시분만 예산 내에서 굽는다.
-    for (const cell of this.cells) {
-      if (cell.bundled || cell.params.stage === STAGE.EMPTY) continue;
-      if (this._bakesThisFrame >= this._frameBakeBudget) return;
-      const baked = this.bakedByDate.get(cell.params.date);
-      if (!baked) continue;
-      const live = cell.isActive;
-      const P = live ? PAL : PAL_PAST;
-      const ds = live ? 1.0 : 0.85;
-      const sd = cell.params.seed || cell.params.date;
-      const sub = this._subFrame(cell.params.stage, cell.params.stageProgress);
-      const key = "d|" + cell.params.date + "|" + (live ? "L" : "P") + "|" + cell.params.stage + "|s" + sub;
-      if (this.spriteCache.has(key)) continue;
-      const sheetInfo = {
-        // 수종 = 서버 데이터값(params.species) 우선, 없으면 speciesFor(seed) 폴백(하위호환).
-        species: cell.params.species != null ? cell.params.species : this.sheet.speciesFor(sd),
-        stage: cell.params.stage,
-        stageProgress: cell.params.stageProgress,
-        past: !live,
-      };
-      this._treeSprite(key, baked, P, ds, sd, true, sheetInfo);
-    }
-  }
-
   // 간이 저해상 임시본: 완성 전 화면용. 풀밭 한 톤 + 묶인 군집 발자국을 옅은 숲 블록으로 대략 표시.
   //   절차 픽셀 루프 없이 fillRect 몇 개 — 매우 가볍다.
   _buildProvisionalSnapshot(m, snapW, snapH, scale) {
@@ -1371,27 +1282,6 @@ export class ForestRenderer {
       g.fillRect(x, y, w, h);
     }
     return { canvas: cv, snapW, snapH, scale, offX: m.x0, offY: m.y0 };
-  }
-
-  // 스냅샷 완성 판정: 가시 묶인 군집 스프라이트 모두 done + 미베이크 셀 나무 없음.
-  _snapAllBaked() {
-    for (const fb of this.forestBlobs) {
-      const cluster = this.forestTrees.get(fb.ym);
-      if (!cluster || !cluster.bbox) continue;
-      // 그루 0(전부 empty 인 묶인 달)은 베이크할 스프라이트가 없다(_forestSprite=null). 바닥은
-      //   ground 패스가 bundledFootprint 로 그리므로 "구울 게 없음 = 완성"으로 본다. 이 가드가
-      //   없으면 영영 false → 합성 미도달 → 임시본(균일 초록 + 숲 bbox 사각)이 고정 노출(회귀).
-      if (!cluster.instances || cluster.instances.length === 0) continue;
-      const sp = this.forestSprites.get(fb.ym);
-      if (!sp || sp.sig !== cluster.sig || !sp.done) return false;
-    }
-    for (const cell of this.cells) {
-      if (cell.bundled || cell.params.stage === STAGE.EMPTY) continue;
-      const sub = this._subFrame(cell.params.stage, cell.params.stageProgress);
-      const key = "d|" + cell.params.date + "|" + (cell.isActive ? "L" : "P") + "|" + cell.params.stage + "|s" + sub;
-      if (!this.spriteCache.has(key)) return false;
-    }
-    return true;
   }
 
   // 성목 주변 부유 금색 파티클 그리기: 반짝임 + 페이드. 작고 은은하게.
@@ -1420,7 +1310,7 @@ export class ForestRenderer {
       const fb = this.forestBlobs[fi];
       const cluster = this.forestTrees.get(fb.ym);
       if (!cluster || !cluster.bbox) continue;
-      const bb = cluster.drawBBox || cluster.bbox;
+      const bb = cluster.bbox;
       const cx0 = ox + (bb.x0 - this.worldOriginX);
       const cx1 = ox + (bb.x1 - this.worldOriginX);
       const cy0 = oy + (bb.y0 - this.worldOriginY);
@@ -1532,7 +1422,7 @@ export class ForestRenderer {
     const gy = Math.round(ty / 3);
     const cell = this.cellByKey.get(gx + "," + gy);
     if (!cell || cell.params.stage === STAGE.EMPTY) return null;
-    if (cell.bundled) return null; // 묶인 달은 숲 덩어리로 그리므로 발치 흙 패치 안 깖
+    // F1: 묶인 달도 낱개 나무 → 발치 footprint 를 활성 나무와 동일하게 예약(장식·바위 겹침 방지).
     const dx = tx - gx * 3;
     const dy = ty - gy * 3;
     const fp = cell.placement ? cell.placement.footprint : this._footprintOffsets(cell.params.stage);
@@ -1809,10 +1699,11 @@ export class ForestRenderer {
     //    묶인(bundled) 달 셀은 개별 나무로 안 그린다(아래 숲 덩어리로 대체).
     //    화면 밖 컬링: 백버퍼 밖(여유 GRID*2)인 셀은 objs 에 넣지도, 베이크하지도 않는다.
     //    → 한 화면 작업집합 = 보이는 그리드 수십 칸뿐(427일 전체 아님) → 베이크 작업집합 < 상한.
+    //    F1: 묶인(bundled) 달 셀도 이번 달과 똑같이 낱개 나무로 push 한다 — 각자 밑동 y 로 전역
+    //    Y-sort 에 참여해 숲끼리·숲과 낱개 나무가 겹쳐도 앞뒤 순서가 자동 정합(덩어리 단일 y 폐기).
     const MARGIN = GRID * 2;
     for (const cell of this.cells) {
       if (cell.params.stage === STAGE.EMPTY) continue;
-      if (cell.bundled) continue;
       const sc = gridToScreen(cell.gx, cell.gy, ox, oy);
       const off = cell.placement ? cell.placement.offsetTiles : { x: 0, y: 0 };
       const tsx = (sc.x + off.x * TILE) | 0;
@@ -1822,25 +1713,18 @@ export class ForestRenderer {
       objs.push({ kind: "tree", cell, sx: tsx, sy: tsy, y: tsy });
     }
 
-    // 3.5) 숲 군집: 묶인 달마다 달 1장(군집 전체를 합친 스프라이트). 그루당 1장으로 펼치면 스프라이트
-    //   수가 LRU 상한을 넘어 매 프레임 전량 재베이크로 행 → 달 단위 1장으로 스프라이트 수 = 달 수로 축소.
-    //   군집 내부는 베이크 시점에 Y-sort 닫힘. 전역 Y-sort 에는 군집 바닥 y 기준 1객체로 참여.
+    // 3.5) 묶인 달 바닥(F1): 덩어리 스프라이트는 폐기됐지만, 묶인 영역을 "한 숲"으로 읽히게 바닥
+    //   질감(낙엽·이끼·풀결)만 낱개 나무 아래에 깐다. Y-sort 미참여(바닥은 항상 나무 뒤). 화면 컬링.
     for (const fb of this.forestBlobs) {
       const cluster = this.forestTrees.get(fb.ym);
       if (!cluster || !cluster.bbox) continue;
-      // 화면 밖 군집 컬링: 군집 월드 bbox 가 백버퍼 밖이면 베이크·그리기 스킵. 그릴 사각 합집합(drawBBox)
-      //   기준 — 베이크 캔버스와 같은 범위라 외곽 나무가 컬링 경계에서 잘려 사라지지 않는다.
-      const cb = cluster.drawBBox || cluster.bbox;
+      const cb = cluster.bbox;
       const sx0 = ox + (cb.x0 - this.worldOriginX);
       const sx1 = ox + (cb.x1 - this.worldOriginX);
       const sy0 = oy + (cb.y0 - this.worldOriginY);
       const sy1 = oy + (cb.y1 - this.worldOriginY);
       if (sx1 < -MARGIN || sx0 > W + MARGIN || sy1 < -MARGIN || sy0 > H + MARGIN) continue;
-      // 군집 바닥 음영(셀 발자국 기반) — Y-sort 전에 한 번에 깔아 나무 발치를 묶는다.
       this._drawForestFloor(b, cluster, ox, oy);
-      // 군집 바닥 y(월드) = 멤버 셀 bbox 하단 → Y-sort 키. 인접 일반 나무와 군집 y 범위 기준 겹침.
-      const floorY = (oy + (cluster.bbox.y1 - this.worldOriginY)) | 0;
-      objs.push({ kind: "forest", ym: fb.ym, cluster, ox, oy, y: floorY });
     }
 
     // 3.6) 마지막 활성 깃발을 Y-sort 큐에 편입(나무·바위·식생과 한 큐). 접지 y = 칸 우하단-5px 의 y →
@@ -1855,18 +1739,23 @@ export class ForestRenderer {
     // 그리기 직전 Y-sort: 화면 위(작은 y)부터 → 아래(큰 y)가 앞. 호버는 위치를 바꾸지 않는다(떠오름 폐기)
     //   — 마우스 오버 강조는 _drawHoverHighlight(옅은 녹색 외곽선)가 render 패스에서 별도로 그린다.
     objs.sort((a, c) => a.y - c.y);
-    // 호버 스포트라이트: 툴팁 대상(호버 칸 나무 또는 호버 숲)만 선명, 나머지 나무·숲은 반투명.
-    //   오버뷰/스냅샷 합성 경로에선 비활성(_drawHoverHighlight 와 동일 가드) — 페이드가 맵 스냅샷에
-    //   구워지는 회귀 방지(§ 오버뷰 스냅샷 함정). 바위·물·깃발·식생·바닥은 대상 아님.
+    // 호버 스포트라이트(F2): 대상 나무만 선명, 나머지 나무는 반투명. 대상 =
+    //   (1) 호버한 그 칸 나무(현재 달·단일), 또는 (2) 호버한 지난 달 나무면 **그 달 전체** 나무
+    //   ("이게 한 숲" 을 덩어리 대신 그룹 하일라이트로 표현). 오버뷰/스냅샷 합성 경로에선 비활성
+    //   (_drawHoverHighlight 와 동일 가드) — 페이드가 맵 스냅샷에 구워지는 회귀 방지. 바위·물·깃발·
+    //   식생·바닥은 대상 아님.
     const spot = this._hoverSpotlight();
     for (const o of objs) {
-      const fade = spot && (
-        (o.kind === "tree" && !(spot.cell && spot.cell.gx === o.cell.gx && spot.cell.gy === o.cell.gy)) ||
-        (o.kind === "forest" && spot.ym !== o.ym)
-      );
+      let fade = false;
+      if (spot && o.kind === "tree") {
+        const c = o.cell;
+        const isTarget =
+          (spot.cell && spot.cell.gx === c.gx && spot.cell.gy === c.gy) ||
+          (spot.ym && c.params.date.slice(0, 7) === spot.ym);
+        fade = !isTarget;
+      }
       if (fade) b.globalAlpha = HOVER_FADE_ALPHA;
       if (o.kind === "tree") this._drawTree(b, o.cell, o.sx, o.sy);
-      else if (o.kind === "forest") this._drawForest(b, o.ym, o.cluster, o.ox, o.oy);
       else if (o.kind === "rock") this._drawVolumeRock(b, o.sx, o.sy, o.tx, o.ty); // 입체 바위
       else if (o.kind === "pool") drawWaterPool(b, o.sx, o.sy, o.tx, o.ty); // 물 웅덩이(장식)
       else if (o.kind === "flag") this._drawLastActiveFlag(b, o.ox, o.oy); // Y-sort 편입 깃발
@@ -2031,22 +1920,8 @@ export class ForestRenderer {
           }
         }
       }
-      // ③ 얼룩 그늘 — **나무 인스턴스 밑동 아래만** 아주 작은 타원(반경 ≤ GRID/4·옅게 0.14). 나무 없는
-      //    칸엔 0(instances 기준). 칸 단위 노이즈 아님 — 나무 위치 기준이라 칸 경계와 무관.
-      const insts = cluster.instances || [];
-      const shadeCap = (GRID / 4) | 0; // 그늘 반경 상한 = 칸 1/4
-      for (const inst of insts) {
-        const tx = (ox + (inst.wx - this.worldOriginX)) | 0;
-        const ty = (oy + (inst.wy - this.worldOriginY)) | 0;
-        const rw = Math.min(shadeCap, Math.max(3, (7 * (inst.scale || 0.5)) | 0)); // ≤ GRID/4
-        b.fillStyle = "rgba(20,40,24,0.14)"; // 차가운 녹그늘(옅게 — 이전 0.22 → 0.14)
-        // 발치 타원 그늘(가로 납작) — 2~3행 스캔라인 근사(저비용).
-        for (let dy = -1; dy <= 1; dy++) {
-          const w = (rw * (1 - Math.abs(dy) * 0.35)) | 0;
-          if (w <= 0) continue;
-          b.fillRect(tx - w, ty + dy, w * 2, 1);
-        }
-      }
+      // (F1) 나무 인스턴스 밑동 아래 얼룩 그늘은 폐기 — 이제 묶인 달도 낱개 셀 나무라 발치 그늘은
+      //   활성 나무와 같은 _collectShadeStumps/_shadeAt(풀 감쇠) 경로가 담당한다.
       // 풀결 굽이침: 묶인 숲 바닥 풀잎을 짧은 줄기로 그리고 밑동 고정·끝 최대로 휜다. 줄기 높이만큼
       //   y비례 오프셋(밑동 0 → 끝 sway). 프레임 사인 + 가닥별 위상(시드). 진폭 작게(끝 ~1~2px). 라이브만.
       const swayBase = this.frame * 0.06;
@@ -2083,94 +1958,6 @@ export class ForestRenderer {
         }
       }
     }
-  }
-
-  // 숲 군집 = 달 1장 스프라이트: 묶인 달의 모든 그루를 오프스크린 1장에 합쳐 베이크하고 매 프레임
-  //   drawImage 1콜만. 군집 내부는 베이크 시점에 Y-sort 닫힘. 캐시 키 = ym. 군집은 항상 PAST 톤.
-  _drawForest(b, ym, cluster, ox, oy) {
-    const sp = this._forestSprite(ym, cluster);
-    if (!sp) return; // 베이크 예산 초과 + 캐시 없음 → 이 프레임 스킵(다음 프레임에 채워짐)
-    // 스프라이트 원점 = 군집 월드 bbox 좌상단(wx0,wy0)에서 up 만큼 위. 화면으로 변환해 blit.
-    //   진행 중(미완성) 스프라이트도 그린다(채워진 만큼). 빈 곳은 _drawForestFloor 바닥 음영이 이미
-    //   깔려 있어 플레이스홀더 잔류로 안 보인다. 매 프레임 일부 그루가 늘어 자연스럽게 완성.
-    const dx = (ox + (sp.wx0 - this.worldOriginX) - sp.rx) | 0;
-    const dy = (oy + (sp.wy0 - this.worldOriginY) - sp.ry) | 0;
-    b.drawImage(sp.canvas, dx, dy);
-  }
-
-  // 달 1장 점진(progressive) 베이크: 묶인 달의 그루(수십~수백)를 한 프레임에 다 굽지 않고 프레임마다
-  //   _instBakeBudget 그루씩 같은 오프스크린 캔버스에 누적 그린다(한 동기 호출이면 빽빽한 달이 수십초
-  //   블록 → freeze). 진행 상태(bakedCount·sorted)를 스프라이트 객체에 보존해 매 프레임 다음 청크만
-  //   그린다. 완성 전이라도 캔버스를 반환(부분 렌더) → 바닥 음영 위에 그루가 점점 차오른다.
-  //   캐시 키 = ym. cluster.sig 가 바뀌면 _computeForestClusters 가 forestSprites.delete → 재시작.
-  _forestSprite(ym, cluster) {
-    let sp = this.forestSprites.get(ym);
-    // 시그니처 불일치(내용 변경) → 폐기하고 새로 시작(아래에서 재생성).
-    if (sp && sp.sig !== cluster.sig) { this.forestSprites.delete(ym); sp = null; }
-
-    // 신규: 캔버스·정렬목록 준비(그리기 0). 이 단계는 베이크 예산을 소비하지 않는다(픽셀 0).
-    if (!sp) {
-      const insts = cluster.instances || [];
-      if (insts.length === 0) return null;
-      // 캔버스 = 그루 실제 그릴 사각 합집합(drawBBox). footprint bbox 만 쓰면 시트/성목 프레임 폭·오버행을
-      //   못 덮어 외곽 나무가 세로 직선으로 잘린다. drawBBox 는 모든 그루 사각·바닥·풀잎 결·안전 마진을
-      //   포함하므로 추가 PAD 없이 그대로 쓰고, rx/ry = 그루 footprint bbox(wx0,wy0)의 캔버스 내 위치.
-      const fb = cluster.bbox;
-      const db = cluster.drawBBox || fb;
-      const wx0 = fb.x0, wy0 = fb.y0; // 앵커 = 나무 footprint bbox 좌상단(_drawForest 의 dx/dy 식과 정합)
-      const w = Math.max(1, Math.ceil(db.x1 - db.x0));
-      const h = Math.max(1, Math.ceil(db.y1 - db.y0));
-      if (w > 8192 || h > 8192) return null; // 비정상 크기 방어
-      const rx = Math.round(wx0 - db.x0); // wx0 의 캔버스 내 x(= footprint 좌상단까지의 좌측 여백)
-      const ry = Math.round(wy0 - db.y0); // wy0 의 캔버스 내 y(= 위쪽 그릴 여유)
-      const cv = document.createElement("canvas");
-      cv.width = w; cv.height = h;
-      const sctx = cv.getContext("2d");
-      sctx.imageSmoothingEnabled = false;
-      // 그루를 군집 로컬 밑동 좌표로 변환 후 Y-sort(밑동 y) → 군집 내부 앞뒤 겹침 닫힘.
-      const sorted = insts
-        .map((inst) => ({ inst, lx: (inst.wx - wx0) + rx, ly: (inst.wy - wy0) + ry }))
-        .sort((a, c) => a.ly - c.ly);
-      sp = { canvas: cv, ctx: sctx, sorted, bakedCount: 0, done: false, rx, ry, wx0, wy0, sig: cluster.sig };
-      this.forestSprites.set(ym, sp);
-    } else {
-      // LRU 갱신.
-      this.forestSprites.delete(ym);
-      this.forestSprites.set(ym, sp);
-    }
-
-    // 이미 완성이면 픽셀 작업 0 — 즉시 반환(정지 상태 베이크 0/프레임, 요구 3).
-    if (sp.done) return sp;
-
-    // 프레임당 그루 예산: 이 프레임에 아직 쓸 수 있는 만큼만 누적 그린다(전역 _bakesThisFrame 는
-    //   청크당 1 소비 → 여러 군집이 한 프레임을 독점하지 않게 분산). 예산 0 이면 부분 캔버스라도 반환.
-    if (this._bakesThisFrame >= this._frameBakeBudget) {
-      return sp.bakedCount > 0 ? sp : (this.forestSprites.has(ym) ? sp : null);
-    }
-    this._bakesThisFrame++;
-    const sctx = sp.ctx;
-    const sorted = sp.sorted;
-    const end = Math.min(sorted.length, sp.bakedCount + this._instBakeBudget);
-    const useSheet = this._useSheet();
-    for (let i = sp.bakedCount; i < end; i++) {
-      const it = sorted[i];
-      const baked = it.inst.baked;
-      if (!baked) continue;
-      const sd = hash32(it.inst.seed);
-      if (useSheet) {
-        // 군집 작은 나무도 시트 blit(항상 PAST 톤). inst.scale(0.34~0.56)로 더 작게.
-        this._blitSheetTreeInto(sctx, it.lx | 0, it.ly | 0, it.inst, true);
-      } else {
-        // 절차 폴백: 군집 작은 나무 — withCap=false(상단 보강 잎 생략). 직접 본체 그리기.
-        paintTreeBody(sctx, baked, it.lx | 0, it.ly | 0, PAL_PAST, 1.0, sd, false);
-      }
-    }
-    sp.bakedCount = end;
-    if (sp.bakedCount >= sorted.length) {
-      sp.done = true;
-      this._forestBakes++; // 스모크 카운터: 군집 1장 완성 시 1 증가(완료 단위)
-    }
-    return sp;
   }
 
   // 시트 나무 목적지 폭(px): 성목 최상위 프레임(sprite_S_9)이 맞춰질 성목 가독 폭. 전 프레임 공유
@@ -2256,70 +2043,18 @@ export class ForestRenderer {
     return { canvas: cv, ax, ay };
   }
 
-  // 군집 작은 나무: 시트 프레임을 군집 캔버스 ctx 의 (lx,ly=밑동 하단중앙)에 직접 blit한다.
-  //   inst.scale(0.34~0.56)로 더 작게(원근감), 항상 PAST 톤(군집=묶인 과거 달)이면 멀티플라이.
-  //   nearest(imageSmoothing=false) 다운스케일. 시트 프레임 누락 시 절차 폴백(false 반환은 안 하고
-  //   호출부가 useSheet 로 분기하므로 여기선 프레임 있을 때만 그린다).
-  _blitSheetTreeInto(ctx, lx, ly, inst, past) {
-    const species = this.sheet.speciesFor(inst.seed);
-    const fr = this.sheet.frameFor(species, inst.stage, inst.stageProgress);
-    if (!fr) return;
-    // 공유 스케일 × inst.scale(원근감). 군집은 작은 나무라 더 줄인다. 절대 프레임 크기 비례라
-    //   군집 안에서도 단계가 크면 더 크게 보인다. _instDrawRect 와 반드시 같은 식(잘림 0).
-    const scale = Math.max(0.08, this._sheetScale(species) * (inst.scale || 0.45) * 2.0);
-    const dw = Math.max(1, Math.round(fr.w * scale));
-    const dh = Math.max(1, Math.round(fr.h * scale));
-    const dx = (lx - dw / 2) | 0;
-    const dy = (ly - dh) | 0; // 밑동(ly)이 하단
-    if (past) {
-      // 군집은 한 캔버스에 누적 → 멀티플라이를 그루 단위로 적용하려면 임시 캔버스 경유(알파 보존).
-      const tcv = document.createElement("canvas");
-      tcv.width = dw; tcv.height = dh;
-      const tg = tcv.getContext("2d");
-      tg.imageSmoothingEnabled = false;
-      tg.drawImage(this.sheet.image, fr.x, fr.y, fr.w, fr.h, 0, 0, dw, dh);
-      tg.globalCompositeOperation = "source-atop";
-      tg.fillStyle = "rgba(70,86,74,0.34)";
-      tg.fillRect(0, 0, dw, dh);
-      tg.globalCompositeOperation = "source-over";
-      ctx.drawImage(tcv, dx, dy);
-    } else {
-      ctx.drawImage(this.sheet.image, fr.x, fr.y, fr.w, fr.h, dx, dy, dw, dh);
-    }
-  }
-
-  // 나무 스프라이트 베이크 + LRU 캐시. key 로 캐시 조회, 없으면 한 그루 전체를 오프스크린 캔버스에
-  //   1회 그려(_paintTreeBody) 캐시한다. 반환 {canvas, ax, ay}: ax/ay = 밑동의 스프라이트 내 픽셀
-  //   좌표(drawImage 위치 = 화면밑동 − ax/ay). 픽셀퍼펙트: 오프스크린 imageSmoothing=false, 백버퍼에
-  //   1:1 정수 좌표 drawImage(스케일 변환 없음). 시트가 준비됐으면 절차 대신 시트 프레임 blit(폴백=절차).
-  _treeSprite(key, baked, P, ds, seedVal, withCap, sheetInfo) {
+  // 나무 한 그루를 캐시 없이 오프스크린에 1회 베이크해 {canvas, ax, ay} 반환(순수 베이크).
+  //   ax/ay = 밑동의 스프라이트 내 픽셀 좌표. 시트가 준비됐으면 시트 프레임 blit, 아니면 절차
+  //   paintTreeBody. 캐시/예산/LRU 를 뺀 부분 — 캐시 경로(_treeSprite)와 오버뷰 합성 직접그리기
+  //   (_drawTree 의 _snapComposite 분기)가 공유해 같은 픽셀을 만든다.
+  _bakeTreeSprite(baked, P, ds, seedVal, withCap, sheetInfo) {
     if (!baked) return null;
-    const cached = this.spriteCache.get(key);
-    if (cached) {
-      // LRU 갱신: 재삽입으로 최근 사용 표시.
-      this.spriteCache.delete(key);
-      this.spriteCache.set(key, cached);
-      return cached;
-    }
-    // 프레임당 베이크 예산: 한 프레임에 budget 장까지만 새로 굽는다(콜드/줌 진입 분산). 초과분은 이
-    //   프레임 null 반환 → 호출자가 1회 스킵(다음 프레임에 채워짐).
-    if (this._bakesThisFrame >= this._frameBakeBudget) return null;
-    this._bakesThisFrame++;
-    // 시트 경로: 준비됐고 sheetInfo 가 있으면 절차 _paintTreeBody 대신 시트 프레임 blit 베이크.
+    // 시트 경로: 준비됐고 sheetInfo 가 있으면 절차 대신 시트 프레임 blit 베이크(폴백=절차).
     if (sheetInfo && this._useSheet()) {
       const sp = this._bakeSheetFrame(
         sheetInfo.species, sheetInfo.stage, sheetInfo.stageProgress, sheetInfo.past
       );
-      if (sp) {
-        this.spriteCache.set(key, sp);
-        this._spriteBakes++;
-        if (this.spriteCache.size > this.spriteCap) {
-          const oldest = this.spriteCache.keys().next().value;
-          this.spriteCache.delete(oldest);
-        }
-        return sp;
-      }
-      // 프레임 누락 등 → 절차 폴백으로 계속.
+      if (sp) return sp; // 프레임 누락 등이면 null → 절차 폴백으로 계속
     }
     const sd = hash32(seedVal);
     // 로컬 밑동(ax,ay) 기준 bbox 산정(여유 패딩). 빈 나무 방어.
@@ -2336,7 +2071,27 @@ export class ForestRenderer {
     sctx.imageSmoothingEnabled = false;
     // 스프라이트 내부 밑동 = (ax, ay). 베이크는 카메라/화면과 무관(월드 불변 시드만).
     paintTreeBody(sctx, baked, ax, ay, P, ds, sd, withCap);
-    const sp = { canvas: cv, ax, ay };
+    return { canvas: cv, ax, ay };
+  }
+
+  // 나무 스프라이트 베이크 + LRU 캐시. key 로 캐시 조회, 없으면 _bakeTreeSprite 로 1회 구워 캐시한다.
+  //   반환 {canvas, ax, ay}: drawImage 위치 = 화면밑동 − ax/ay. 픽셀퍼펙트: 오프스크린
+  //   imageSmoothing=false, 백버퍼에 1:1 정수 좌표 drawImage(스케일 변환 없음).
+  _treeSprite(key, baked, P, ds, seedVal, withCap, sheetInfo) {
+    if (!baked) return null;
+    const cached = this.spriteCache.get(key);
+    if (cached) {
+      // LRU 갱신: 재삽입으로 최근 사용 표시.
+      this.spriteCache.delete(key);
+      this.spriteCache.set(key, cached);
+      return cached;
+    }
+    // 프레임당 베이크 예산: 한 프레임에 budget 장까지만 새로 굽는다(콜드/줌 진입 분산). 초과분은 이
+    //   프레임 null 반환 → 호출자가 1회 스킵(다음 프레임에 채워짐).
+    if (this._bakesThisFrame >= this._frameBakeBudget) return null;
+    this._bakesThisFrame++;
+    const sp = this._bakeTreeSprite(baked, P, ds, seedVal, withCap, sheetInfo);
+    if (!sp) return null;
     this.spriteCache.set(key, sp);
     this._spriteBakes++;
     // LRU 상한 초과 시 가장 오래된 항목 제거.
@@ -2383,84 +2138,6 @@ export class ForestRenderer {
       maxY = Math.max(maxY, baseW + 8); // 밑동 아래(흙 박힘) 여유
     }
     return { minX, minY, maxX, maxY };
-  }
-
-  // 군집 한 그루의 실제 그릴 사각(밑동=하단중앙 앵커 기준, 로컬 px). _forestSprite 가 그루를 그리는
-  //   방식(시트=_blitSheetTreeInto, 절차=_paintTreeBody/_treeBBox)과 정확히 같은 식으로 x:[-dw/2,
-  //   +dw/2], y:[-dh, 0] 의 rect 를 돌려준다. 군집 베이크 캔버스 bounds = 모든 그루 이 rect 의 합집합.
-  //   시트/절차 어느 경로든 같은 함수가 산정해 베이크 캔버스와 drawImage 위치가 같은 기준이 된다(잘림 0).
-  //   { left, right, up, down } = 밑동에서 좌/우/위/아래로 뻗는 px(모두 ≥0).
-  _instDrawRect(inst) {
-    if (this._useSheet()) {
-      // 시트 경로: _blitSheetTreeInto 와 동일한 dw/dh 산정(밑동 = 하단중앙).
-      const species = this.sheet.speciesFor(inst.seed);
-      const fr = this.sheet.frameFor(species, inst.stage, inst.stageProgress);
-      if (fr && fr.w > 0) {
-        // _blitSheetTreeInto 와 동일한 scale 식(공유 스케일 × inst.scale × 2.0).
-        const scale = Math.max(0.08, this._sheetScale(species) * (inst.scale || 0.45) * 2.0);
-        const dw = Math.max(1, Math.round(fr.w * scale));
-        const dh = Math.max(1, Math.round(fr.h * scale));
-        // dx = (lx - dw/2)|0 → 좌측 = ceil(dw/2), 우측 = dw - ceil(dw/2). 밑동 dy=(ly-dh)|0 → up=dh.
-        const left = Math.ceil(dw / 2);
-        return { left, right: dw - left, up: dh, down: 0 };
-      }
-      // 시트 프레임 누락 → 절차 폴백 rect 로 계속.
-    }
-    // 절차 경로: _treeBBox(밑동 원점, ds=1.0 — 군집은 _paintTreeBody 를 ds=1.0 으로 호출).
-    const baked = inst.baked;
-    if (!baked) return { left: 1, right: 1, up: 1, down: 1 };
-    const bb = this._treeBBox(baked, 1.0);
-    // _treeBBox 는 SY=baseY-vy → minY(=위) 음수, maxY(=아래·뿌리) 양수. 좌/우는 minX/maxX.
-    return {
-      left: Math.ceil(Math.max(0, -bb.minX)),
-      right: Math.ceil(Math.max(0, bb.maxX)),
-      up: Math.ceil(Math.max(0, -bb.minY)),
-      down: Math.ceil(Math.max(0, bb.maxY)),
-    };
-  }
-
-  // 군집 베이크 캔버스 bounds(월드 px) = 모든 그루의 실제 그릴 사각 합집합 ∪ 바닥 합집합(침식/확장
-  //   ±E 포함) ∪ 풀잎 결 범위 + 안전 마진. floor 는 멤버 셀 footprint(중심 ±GRID/2) + 외곽 E 확장 +
-  //   풀잎 결 reach. 반환 drawBBox/drawUp/drawDown 은 cluster.bbox(나무 footprint) 와 별개로 저장해
-  //   베이크·extent·컬링이 동일 기준을 쓰게 한다(잘림 0). 나무 월드 위치는 불변 — bounds 만 넓힌다.
-  _computeClusterDrawBounds(forest, members) {
-    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    // 1) 그루 그릴 사각 합집합.
-    for (const inst of forest.instances) {
-      const r = this._instDrawRect(inst);
-      x0 = Math.min(x0, inst.wx - r.left);
-      x1 = Math.max(x1, inst.wx + r.right);
-      y0 = Math.min(y0, inst.wy - r.up); // 위(상단)
-      y1 = Math.max(y1, inst.wy + r.down); // 아래(뿌리·발치)
-    }
-    // 2) 바닥 합집합(멤버 셀 footprint + 외곽 침식/확장 E + 풀잎 결 reach).
-    //    _drawForestFloor 와 정합: footprint = 셀중심 ±GRID/2, 외곽 변 +E, 풀잎 결 reach = GRID*0.42.
-    const half = GRID / 2;
-    const E = Math.max(4, (GRID * 0.12) | 0);
-    const bladeReach = GRID * 0.42;
-    const floorPad = Math.max(E, Math.ceil(bladeReach - half) + 1); // 결이 셀 밖으로 더 나가면 그만큼
-    for (const m of members) {
-      const cx = this.worldOriginX + m.gx * GRID;
-      const cy = this.worldOriginY + m.gy * GRID;
-      x0 = Math.min(x0, cx - half - floorPad); x1 = Math.max(x1, cx + half + floorPad);
-      y0 = Math.min(y0, cy - half - floorPad); y1 = Math.max(y1, cy + half + floorPad);
-    }
-    if (!Number.isFinite(x0)) {
-      x0 = this.worldOriginX - half; x1 = this.worldOriginX + half;
-      y0 = this.worldOriginY - half; y1 = this.worldOriginY + half;
-    }
-    // 3) 안전 마진(2~4px).
-    const SAFE = 4;
-    x0 -= SAFE; x1 += SAFE; y0 -= SAFE; y1 += SAFE;
-    // drawBBox = 그루 footprint bbox(forest.bbox) 기준 up/down 으로 환산(기존 인터페이스 호환).
-    //   _forestSprite 는 drawBBox 를 직접 쓰고, _contentWorldBounds/컬링은 drawBBox 가 있으면 우선.
-    const fb = forest.bbox;
-    const drawUp = Math.max(0, Math.round(fb.y0 - y0));
-    const drawDown = Math.max(0, Math.round(y1 - fb.y1));
-    return {
-      drawBBox: { x0: Math.floor(x0), x1: Math.ceil(x1), y0: Math.floor(y0), y1: Math.ceil(y1) },
-      drawUp, drawDown,
-    };
   }
 
   // 그리드(3×3=하루) 외곽 경계 + 오늘 그리드 펄스 점등.
@@ -2765,7 +2442,12 @@ export class ForestRenderer {
       stageProgress: cell.params.stageProgress,
       past: !live,
     };
-    const sp = this._treeSprite(key, baked, P, ds, sd, true, sheetInfo);
+    // 오버뷰 합성(_snapComposite)은 스냅샷을 한 번 굽고 끝 → 나무를 캐시할 이유가 없다. 캐시 우회로
+    //   임시 베이크→blit→폐기(_bakeTreeSprite): spriteCache 가 총 나무 수에 비례해 부푸는 병목 제거.
+    //   같은 베이크 로직이라 캐시 경로와 픽셀 동일. 정상 화면은 종전대로 _treeSprite(캐시·컬링·LRU).
+    const sp = this._snapComposite
+      ? this._bakeTreeSprite(baked, P, ds, sd, true, sheetInfo)
+      : this._treeSprite(key, baked, P, ds, sd, true, sheetInfo);
     if (!sp) return;
     const baseY = sy + 5; // 밑동을 타일 중심보다 아래(땅에 박힌 느낌)
     b.drawImage(sp.canvas, (sx - sp.ax) | 0, (baseY - sp.ay) | 0);
@@ -2780,10 +2462,10 @@ export class ForestRenderer {
     const stumps = [];
     const MARGIN = GRID * 2;
     const rf = VEG_TWEAKS.shadowRadiusFactor;
-    // 활성 그리드: 각 셀 placement 밑동(나무 그리기와 동일 식: gridToScreen + offsetTiles, baseY=sy+5).
+    // 셀 나무(F1: 묶인 달 포함 — 모두 낱개 셀 나무). placement 밑동(나무 그리기와 동일 식:
+    //   gridToScreen + offsetTiles, baseY=sy+5).
     for (const cell of this.cells) {
       if (cell.params.stage === STAGE.EMPTY) continue; // empty=나무 없음 → 그늘 0(D 자동)
-      if (cell.bundled) continue; // 묶인 달은 숲 instances 로(아래)
       const sc = gridToScreen(cell.gx, cell.gy, ox, oy);
       const off = cell.placement ? cell.placement.offsetTiles : { x: 0, y: 0 };
       const sx = sc.x + off.x * TILE;
@@ -2792,20 +2474,6 @@ export class ForestRenderer {
       const fw = this._footprintWidth(cell.params.stage);
       if (!Number.isFinite(fw)) continue;
       stumps.push({ wx: sx, wy: sy, rad: fw * rf });
-    }
-    // 묶인 숲: forest.instances 밑동(월드 px wx/wy). 같은 그늘 로직(F 공통).
-    for (const fb of this.forestBlobs) {
-      const cluster = this.forestTrees.get(fb.ym);
-      if (!cluster) continue;
-      const insts = cluster.instances || [];
-      for (const inst of insts) {
-        const sx = ox + (inst.wx - this.worldOriginX);
-        const sy = oy + (inst.wy - this.worldOriginY);
-        if (sx < -MARGIN || sx > W + MARGIN || sy < -MARGIN || sy > H + MARGIN) continue;
-        // 군집 그루는 scale(0.4~1.0)로 묘목~성목. 폭 ≈ _footprintWidth(MATURE)×scale 근사.
-        const fw = this._footprintWidth(STAGE.MATURE) * (inst.scale || 0.5);
-        stumps.push({ wx: sx, wy: sy, rad: fw * rf });
-      }
     }
     return stumps;
   }
@@ -2886,11 +2554,12 @@ export class ForestRenderer {
   //   @returns {string|null} "data:image/png;..." 또는 null
   selectedCellPreview(sizePx) {
     const cell = this.selectedCell;
-    if (!cell || cell.bundled) return null;
+    if (!cell) return null; // F3: 묶인 달 셀도 상세 프리뷰 허용
     const size = sizePx || 128;
     const stage = cell.params.stage;
     const sub = this._subFrame(stage, cell.params.stageProgress);
-    const liveGrid = this._isActiveGridCell(cell.gx, cell.gy); // 배치된 칸이면 풀밭(맵과 동일)
+    // 배치 칸(활성) 또는 묶인 달(숲 바닥)이면 풀밭 블록, 아니면 흙(맵 바닥과 동일).
+    const liveGrid = this._isActiveGridCell(cell.gx, cell.gy) || cell.bundled;
     const key = "pv|" + size + "|" + cell.params.date + "|" + (liveGrid ? "A" : "I") + "|" + stage + "|s" + sub;
     if (this._previewCache && this._previewCache.key === key) return this._previewCache.url;
 
@@ -3000,19 +2669,19 @@ export class ForestRenderer {
       gy: Math.round((worldY - this.worldOriginY) / GRID),
     };
   }
-  // 캔버스 px → 셀(빈땅 포함) 또는 null. 상세 패널·툴팁·호버 떠오름용. 묶인 달 셀은 제외(숲 히트로 처리).
+  // 캔버스 px → 셀(빈땅 포함) 또는 null. 상세 패널·툴팁·그룹 하일라이트용.
+  //   F3: 묶인 달 셀도 낱개라 그대로 반환 → 아무 나무나 바로 클릭하면 그날 상세(1단계).
   //   ① 나무 스프라이트 bbox 우선(성목 수관 호버도 밑동 셀 잡음) ② 폴백 그리드 칸 조회.
   hitTestCanvas(cx, cy) {
     const t = this._treeAtCanvas(cx, cy);
     if (t) return t; // 나무 시각 영역(수관 포함) 안 → 그 나무 base 셀
     const g = this.hitTestGrid(cx, cy);
     if (!g) return null;
-    const cell = this.cellByKey.get(g.gx + "," + g.gy) || null;
-    if (cell && cell.bundled) return null; // 묶인 달은 숲 단위 — 일 셀 상세 막음(드릴다운 우선)
-    return cell;
+    return this.cellByKey.get(g.gx + "," + g.gy) || null;
   }
 
-  // 캔버스 px → 묶인 달 ym(숲 덩어리 영역) 또는 null. 클릭=드릴다운 토글, 호버=요약 툴팁.
+  // 캔버스 px → 그 칸이 묶인 달이면 ym, 아니면 null. 활성화 커서가 묶인 숲 영역엔 안 뜨게 하는 데 씀
+  //   (F2 그룹 하일라이트는 hitTestCanvas 로 잡은 셀의 bundled 로 판단 — 여긴 바닥/빈칸 영역 판정용).
   hitTestForest(cx, cy) {
     const g = this.hitTestGrid(cx, cy);
     if (!g) return null;

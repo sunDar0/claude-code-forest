@@ -103,24 +103,24 @@ test("(e) 같은 내용 폴 ×3 → 재베이크 0·무효화 0 (§28, 트윅 �
   }
 });
 
-test("(f) 드래그(setVegTweak) 시에만 무효화/재베이크", async () => {
+test("(f) 드래그(setVegTweak) 시에만 무효화/재계산", async () => {
   const g = installGlobals(303);
   try {
     const { r } = await makeRenderer(g);
     for (let i = 0; i < 30; i++) r.render();
-    const bakes0 = r._forestBakes;
+    const density0 = r.forestBlobs[0].density;
 
-    // forestDensityCoef 드래그 → 군집 재베이크 발생해야(명시적 트윅).
+    // F1: 덩어리 스프라이트 폐기 → forestDensityCoef 는 blob.density 파생값만 재산출(명시적 트윅).
     r.setVegTweak("forestDensityCoef", 0.4);
     for (let i = 0; i < 30; i++) r.render();
-    assert.ok(r._forestBakes > bakes0, "forestDensityCoef 드래그 후 군집 재베이크가 일어나야 함");
+    assert.notEqual(r.forestBlobs[0].density, density0, "forestDensityCoef 드래그 후 blob density 재산출돼야 함");
 
-    // 바닥 라이브 키(shadowGrassAtten) 드래그 → 군집 재베이크는 없되 스냅샷 무효화는 표시(오버뷰 반영).
-    const bakes1 = r._forestBakes;
+    // 바닥 라이브 키(shadowGrassAtten) 드래그 → blob density 재산출은 없되 스냅샷 무효화는 표시(오버뷰 반영).
+    const density1 = r.forestBlobs[0].density;
     r._mapSnapshotStale = false;
     r.setVegTweak("shadowGrassAtten", 0.7);
     assert.equal(r.getVegTweaks().shadowGrassAtten, 0.7);
-    assert.equal(r._forestBakes, bakes1, "shadowGrassAtten 는 바닥 라이브라 군집 재베이크 없어야 함");
+    assert.equal(r.forestBlobs[0].density, density1, "shadowGrassAtten 는 바닥 라이브라 blob density 불변");
   } finally {
     g.restore();
   }
