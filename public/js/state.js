@@ -16,7 +16,9 @@
 import { forestCellParams } from "./metrics.js";
 import { ColdMockSource } from "./cold-source.js";
 
-const POLL_MS = 5000;
+// 5초 → 15초. 창 최소화·유휴 시에도 setInterval 이 상수 CPU/집계를 유발하던 걸 완화한다.
+//   오늘자 usage·나무 반영은 최대 15초 지연(대시보드 허용선, 나무 자람 체감은 유지).
+const POLL_MS = 15000;
 const API_FOREST = "/api/forest";
 const API_FOREST_MOCK = "/api/forest?mock=1"; // 서버 mock/ 서빙
 const API_ACTIVATE = "/api/grid/activate";

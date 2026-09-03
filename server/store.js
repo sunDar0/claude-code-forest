@@ -82,6 +82,7 @@ const mem = {
   caps: {
     dailyCapTokens: 2,
     treeDailyDenom: 2, // 나무 단계 분모(관측 p85×2). computeTree 전용, HUD dailyCapTokens 와 별개.
+    todayPctSum: 0, // 오늘 시작된 5h 블록 사용률 % 합. 0 이면 토큰 폴백.
     fiveHourPct: null,
     sevenDayPct: null,
     fiveHourCapTokens: 1,
@@ -332,54 +333,21 @@ async function loadAllFromDisk() {
 // ---------------------------------------------------------------------------
 // 오늘자 갱신: jsonl 재집계 → 메모리 오늘 usage·tree + 오늘 파일 1개만 기록
 // ---------------------------------------------------------------------------
-// 나무 단계 = 오늘 5h % 봉우리 합 ÷ 200. 5h 두 윈도우를 100% 씩 채우면 200% = 성목 만개.
-const TREE_PCT_DENOM = 200; // 하루 5h 두 번 × 100% = 만근. 임계 0.3/0.6 → 60%/120% 경계.
-const PCT_RESET_DROP = 30; // 이 %p 이상 떨어졌다 재상승하면 새 5h 윈도우로 보고 봉우리 확정.
+// 나무 단계 = 오늘 시작된 5h 블록들의 사용률 % 합 ÷ 200. 근무 중 리셋 한 번 = 블록 2개가 만근.
+const TREE_PCT_DENOM = 200; // 5h 두 번 × 100% = 만근. 임계 0.3/0.6 → 60%/120% 경계.
 
 /**
- * 폴링으로 관측한 fiveHourPct 시퀀스에서 "봉우리들의 합"을 누적한다.
- *   상승/유지 → 현재 봉우리(peak) 갱신. 큰 폭(PCT_RESET_DROP) 하락 후 재상승 → 직전 봉우리를
- *   sum 에 확정하고 새 봉우리 시작. 완만한 롤링 하락은 한 봉우리로 유지(오인 방지).
- *   앱이 열려 폴링하는 동안만 관측 — 서버 시작 전·앱 오프 구간은 놓친다(오늘은 부분값).
- * @param {object|undefined} track 직전 상태 { sum, peak, valley, lastPct, falling }.
- * @param {number|null} cur 이번 폴의 fiveHourPct(0~100, 캐시 없으면 null).
- * @returns {object} 갱신된 track. 오늘 도달 5h % 합 = track.sum + track.peak.
- */
-function accumulatePeaks(track, cur) {
-  const t = track || { sum: 0, peak: 0, valley: 0, lastPct: null, falling: false };
-  if (typeof cur !== 'number' || cur < 0 || !isFinite(cur)) return t; // 캐시 없음 → 상태 유지.
-  if (t.lastPct === null) {
-    t.peak = cur;
-    t.valley = cur;
-  } else if (cur >= t.lastPct) {
-    if (t.falling && t.peak - t.valley >= PCT_RESET_DROP) {
-      t.sum += t.peak; // 봉우리 확정 후 새 윈도우 시작.
-      t.peak = cur;
-    } else {
-      t.peak = Math.max(t.peak, cur); // 같은 봉우리 유지(얕은 하락 후 회복 포함).
-    }
-    t.falling = false;
-  } else {
-    if (!t.falling) t.valley = cur; // 하락 시작 → 이번 하락 구간의 최저를 초기화.
-    else t.valley = Math.min(t.valley, cur);
-    t.falling = true;
-  }
-  t.lastPct = cur;
-  return t;
-}
-
-/**
- * 오늘자 나무 단계를 정한다. 5h % 봉우리 합이 관측되면(sum>0) 그 합 ÷ 200(5h 두 번 = 만근),
- *   미관측이면(statusline 캐시 없음/정지 → sum 0) 토큰 기반(treeDailyDenom)으로 폴백해
+ * 오늘자 나무 단계를 정한다. 오늘 시작된 5h 블록들의 % 합(aggregate.todayPctSum)이 있으면
+ *   그 합 ÷ 200, 없으면(기준 토큰 미정 등으로 0) 토큰 기반(treeDailyDenom)으로 폴백해
  *   빈 대지(empty) 붕괴를 막는다. 심기(activateGrid)·폴링(refreshToday)이 같은 기준을 쓰게 공유.
- * @param {object} pctTrack accumulatePeaks 상태.
+ *   블록 귀속은 시작 시각 기준이라 어젯밤 시작해 자정을 넘긴 블록은 오늘에 안 얹힌다.
+ * @param {number} pctSum 오늘 시작된 5h 블록 사용률 % 합.
  * @param {object} usage 그날 usage(토큰 폴백용).
  * @param {string} seed 수종 시드.
  */
-function computeTreeForToday(pctTrack, usage, seed) {
-  const sum = pctTrack.sum + pctTrack.peak;
-  return sum > 0
-    ? computeTree({ totalTokens: sum }, TREE_PCT_DENOM, seed)
+function computeTreeForToday(pctSum, usage, seed) {
+  return pctSum > 0
+    ? computeTree({ totalTokens: pctSum }, TREE_PCT_DENOM, seed)
     : computeTree(usage, mem.caps.treeDailyDenom, seed);
 }
 
@@ -393,6 +361,7 @@ export async function refreshToday() {
   mem.caps = {
     dailyCapTokens: agg.dailyCapTokens,
     treeDailyDenom: agg.treeDailyDenom,
+    todayPctSum: agg.todayPctSum,
     fiveHourPct: agg.fiveHourPct,
     sevenDayPct: agg.sevenDayPct,
     fiveHourCapTokens: agg.fiveHourCapTokens,
@@ -408,11 +377,10 @@ export async function refreshToday() {
 
   const usage = agg.byDate.get(today) || zeroUsage();
   day.usage = toUsageSchema(usage);
-  // 나무 단계 = 오늘 5h % 봉우리 합 ÷ 200. 앱 폴링 동안 관측한 fiveHourPct 봉우리들을 누적.
-  //   usage(토큰)는 툴팁·refMax 용으로 계속 저장하되, 단계는 5h % 로만 판정한다.
-  day.pctTrack = accumulatePeaks(day.pctTrack, mem.caps.fiveHourPct);
+  // 나무 단계 = 오늘 시작된 5h 블록들의 % 합 ÷ 200. jsonl 에서 매번 결정적으로 재계산하므로
+  //   앱이 꺼져 있던 구간도 반영된다. usage(토큰)는 툴팁·refMax 용으로 계속 저장.
   const dailyMaxChanged = bumpDailyMax(day.usage); // dailyMaxTokens·treeDailyDenom 은 참고용 노출로만 유지
-  day.tree = computeTreeForToday(day.pctTrack, usage, day.tree ? day.tree.seed : today);
+  day.tree = computeTreeForToday(mem.caps.todayPctSum, usage, day.tree ? day.tree.seed : today);
   day.finalized = false;
   // 오늘 그날 합이 더 크면 refMax·dailyMaxTokens 단조 갱신 → forest.json 영속.
   if (bumpRefMax(usageToRefMetrics(day.usage))) await persistRefMax();
@@ -666,6 +634,7 @@ export async function activateGrid({ date, gx, gy }) {
   mem.caps = {
     dailyCapTokens: agg.dailyCapTokens,
     treeDailyDenom: agg.treeDailyDenom,
+    todayPctSum: agg.todayPctSum,
     fiveHourPct: agg.fiveHourPct,
     sevenDayPct: agg.sevenDayPct,
     fiveHourCapTokens: agg.fiveHourCapTokens,
@@ -676,16 +645,12 @@ export async function activateGrid({ date, gx, gy }) {
   const usageSchema = toUsageSchema(usage);
   const dailyMaxChanged = bumpDailyMax(usageSchema); // dailyMaxTokens 는 참고용 노출로만 유지
   const today = todayLocalYMD();
-  // 오늘 심기: refreshToday 와 같은 5h % 기준(+토큰 폴백)으로 초기화 → 첫 폴에서 튐 없음.
-  //   과거 심기: 5h % 이력이 없으니 토큰(treeDailyDenom)으로 확정 동결.
-  let pctTrack = null;
-  let tree;
-  if (date === today) {
-    pctTrack = accumulatePeaks(undefined, mem.caps.fiveHourPct);
-    tree = computeTreeForToday(pctTrack, usage, date);
-  } else {
-    tree = computeTree(usage, mem.caps.treeDailyDenom, date); // 사용량 0 → stage:empty
-  }
+  // 오늘 심기: refreshToday 와 같은 5h 블록 % 기준(+토큰 폴백)으로 초기화 → 첫 폴에서 튐 없음.
+  //   과거 심기: 그날 시작 블록 % 를 따로 안 구하므로 토큰(treeDailyDenom)으로 확정 동결.
+  const tree =
+    date === today
+      ? computeTreeForToday(mem.caps.todayPctSum, usage, date)
+      : computeTree(usage, mem.caps.treeDailyDenom, date); // 사용량 0 → stage:empty
   // 활성화하는 날의 그날 합으로 refMax·dailyMaxTokens 단조 갱신(과거 날짜 활성화 포함).
   if (bumpRefMax(usageToRefMetrics(usageSchema))) await persistRefMax();
   if (dailyMaxChanged) await persistDailyMax();
@@ -699,7 +664,6 @@ export async function activateGrid({ date, gx, gy }) {
     // 과거 날짜를 활성화하면 즉시 동결(자정 경과분). 오늘은 갱신 계속.
     finalized: date < today,
   };
-  if (pctTrack) day.pctTrack = pctTrack;
   mem.days.set(date, day);
   await persistDay(day);
 

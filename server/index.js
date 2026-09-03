@@ -36,7 +36,10 @@ const DEBUG = process.env.FOREST_DEBUG === '1' || process.env.FOREST_DEBUG === '
 
 // GET /api/forest 는 메모리 즉답이지만, 오늘자 usage·tree 는 jsonl 변동을 반영해야 한다.
 // 폴링 폭주를 막으려고 오늘 재집계는 4초 TTL 로 제한한다(메모리 읽기는 항상 즉답).
-const REFRESH_TTL_MS = 4000;
+// 4초 → 12초. 클라 POLL_MS(15초)보다 낮게 둬(폴당 정확히 1회 재집계) 다중 클라·버스트만
+//   게이트가 막고, 정상 폴은 매번 오늘자를 갱신한다. 캐시(aggregate.js) 덕에 재집계 자체도
+//   변경 파일만 읽어 싸다 — TTL 은 이제 폭주 방지용 하한.
+const REFRESH_TTL_MS = 12000;
 let lastRefresh = 0;
 async function maybeRefreshToday() {
   const now = Date.now();
